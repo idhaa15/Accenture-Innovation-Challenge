@@ -1,0 +1,22 @@
+[
+  {"patient_id":"P001","age_years":45,"has_prior_history":true,"chief_complaint":"vague epigastric pain, mild nausea, radiating to jaw","vitals":{"heart_rate":98,"resp_rate":18,"temp_c":37.1,"spo2":97,"systolic_bp":132},"self_reported_pain":4},
+  {"patient_id":"P002","age_years":3,"has_prior_history":false,"chief_complaint":"fever, lethargy, poor feeding","vitals":{"heart_rate":168,"resp_rate":42,"temp_c":38.6,"spo2":94,"systolic_bp":null},"self_reported_pain":null},
+  {"patient_id":"P003","age_years":29,"has_prior_history":false,"chief_complaint":"MVC, visible arm deformity, no LOC reported","vitals":{"heart_rate":110,"resp_rate":20,"temp_c":36.9,"spo2":98,"systolic_bp":120},"self_reported_pain":8},
+  {"patient_id":"P004","age_years":78,"has_prior_history":true,"chief_complaint":"new confusion, family reports not himself since this morning","vitals":{"heart_rate":88,"resp_rate":16,"temp_c":37.8,"spo2":95,"systolic_bp":138},"self_reported_pain":0},
+  {"patient_id":"P005","age_years":34,"has_prior_history":true,"chief_complaint":"sprained ankle","vitals":{"heart_rate":76,"resp_rate":14,"temp_c":36.8,"spo2":99,"systolic_bp":124},"self_reported_pain":3},
+  {"patient_id":"P006","age_years":51,"has_prior_history":true,"chief_complaint":"shortness of breath and cough","vitals":{"heart_rate":118,"resp_rate":28,"temp_c":38.2,"spo2":90,"systolic_bp":110},"self_reported_pain":2},
+  {"patient_id":"P007","age_years":67,"has_prior_history":true,"chief_complaint":"severe headache with speech change","vitals":{"heart_rate":82,"resp_rate":17,"temp_c":36.7,"spo2":96,"systolic_bp":176},"self_reported_pain":6},
+  {"patient_id":"P008","age_years":22,"has_prior_history":false,"chief_complaint":"vomiting and abdominal pain","vitals":{"heart_rate":104,"resp_rate":19,"temp_c":37.4,"spo2":98,"systolic_bp":118},"self_reported_pain":6},
+  {"patient_id":"P009","age_years":39,"has_prior_history":true,"chief_complaint":"ankle pain after fall","vitals":{"heart_rate":80,"resp_rate":15,"temp_c":36.9,"spo2":99,"systolic_bp":126},"self_reported_pain":4},
+  {"patient_id":"P010","age_years":70,"has_prior_history":true,"chief_complaint":"dizziness and fainting","vitals":{"heart_rate":48,"resp_rate":16,"temp_c":36.4,"spo2":95,"systolic_bp":88},"self_reported_pain":1},
+  {"patient_id":"P011","age_years":9,"has_prior_history":false,"chief_complaint":"rash and fever","vitals":{"heart_rate":142,"resp_rate":30,"temp_c":38.4,"spo2":97,"systolic_bp":102},"self_reported_pain":2},
+  {"patient_id":"P012","age_years":31,"has_prior_history":false,"chief_complaint":"back pain after accident","vitals":{"heart_rate":124,"resp_rate":22,"temp_c":36.8,"spo2":97,"systolic_bp":104},"self_reported_pain":7},
+  {"patient_id":"P013","age_years":43,"has_prior_history":true,"chief_complaint":"wheeze and shortness of breath","vitals":{"heart_rate":106,"resp_rate":26,"temp_c":37.2,"spo2":92,"systolic_bp":128},"self_reported_pain":2},
+  {"patient_id":"P014","age_years":55,"has_prior_history":true,"chief_complaint":"burn to forearm","vitals":{"heart_rate":92,"resp_rate":16,"temp_c":36.9,"spo2":99,"systolic_bp":130},"self_reported_pain":5},
+  {"patient_id":"P015","age_years":26,"has_prior_history":false,"chief_complaint":"chest pain and dizziness","vitals":{"heart_rate":102,"resp_rate":20,"temp_c":37.0,"spo2":98,"systolic_bp":142},"self_reported_pain":5},
+  {"patient_id":"P016","age_years":81,"has_prior_history":true,"chief_complaint":"fever and cough","vitals":{"heart_rate":102,"resp_rate":22,"temp_c":38.1,"spo2":91,"systolic_bp":116},"self_reported_pain":2},
+  {"patient_id":"P017","age_years":14,"has_prior_history":false,"chief_complaint":"headache and vomiting","vitals":{"heart_rate":94,"resp_rate":18,"temp_c":37.0,"spo2":98,"systolic_bp":118},"self_reported_pain":5},
+  {"patient_id":"P018","age_years":36,"has_prior_history":true,"chief_complaint":"abdominal pain and bleeding","vitals":{"heart_rate":128,"resp_rate":24,"temp_c":36.7,"spo2":96,"systolic_bp":86},"self_reported_pain":8},
+  {"patient_id":"P019","age_years":58,"has_prior_history":true,"chief_complaint":"nausea and chest pain","vitals":{"heart_rate":96,"resp_rate":17,"temp_c":37.1,"spo2":98,"systolic_bp":134},"self_reported_pain":3},
+  {"patient_id":"P020","age_years":5,"has_prior_history":false,"chief_complaint":"poor feeding and lethargy","vitals":{"heart_rate":154,"resp_rate":36,"temp_c":37.7,"spo2":96,"systolic_bp":98},"self_reported_pain":null}
+]

@@ -1,6 +1,8 @@
 # PatientTriage.ai
 
-[![Temporary YouTube](https://img.shields.io/badge/YouTube-Karan%20Aujla%20placeholder-FF0000?style=for-the-badge&logo=youtube)](https://www.youtube.com/results?search_query=Karan+Aujla+official+song)
+[![Temporary YouTube](https://img.shields.io/badge/YouTube-Karan%20Aujla%20placeholder-FF0000?style=for-the-badge&logo=youtube)](https://www.youtube.com/watch?v=vsWxs1tuwDk&list=RDvsWxs1tuwDk&start_radio=1)
+
+
 [![Open Local Demo](https://img.shields.io/badge/Open-Local%20Demo-10b981?style=for-the-badge)](http://localhost:3000)
 [![API Health](https://img.shields.io/badge/API-FastAPI-0a7ea4?style=for-the-badge)](http://localhost:8000/health)
 

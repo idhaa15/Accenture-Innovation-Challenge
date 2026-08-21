@@ -5,7 +5,6 @@ import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from random import sample
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -44,12 +43,22 @@ async def assess(payload: dict, trigger: str = 'intake') -> dict:
     return result
 
 
+async def assess_many(records: list[dict], trigger: str = 'intake') -> list[dict]:
+    limit = asyncio.Semaphore(8)
+
+    async def bounded(record: dict) -> dict:
+        async with limit:
+            return await assess(record, trigger)
+
+    return await asyncio.gather(*(bounded(record) for record in records))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.initialise()
     if not database.queue_rows():
         records = json.loads((Path(__file__).parent / 'mock_data' / 'simulated_patients.json').read_text())
-        for record in records[:5]: await assess(record)
+        await assess_many(records[:5])
     yield
 
 
@@ -93,7 +102,7 @@ async def surge(payload: SurgePayload):
         return {'added': 0, 'removed': len(surge_ids), 'patients': serialise_queue(), 'surge_mode': SURGE_ACTIVE}
     existing = {p['patient_id'] for p in database.queue_rows()}
     candidates = [p for p in records if p['patient_id'] not in existing]
-    for record in candidates[:payload.count]: await assess(record)
+    await assess_many(candidates[:payload.count])
     SURGE_ACTIVE = True
     return {'added': min(payload.count, len(candidates)), 'patients': serialise_queue(), 'surge_mode': SURGE_ACTIVE}
 

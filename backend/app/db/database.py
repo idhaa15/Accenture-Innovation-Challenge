@@ -10,6 +10,7 @@ DB_PATH = Path(__file__).resolve().parents[2] / 'patient_triage.db'
 SCHEMA = '''
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS patients (patient_id TEXT PRIMARY KEY, age_years INTEGER NOT NULL, age_band TEXT NOT NULL, has_prior_history BOOLEAN NOT NULL, arrival_ts TEXT NOT NULL, chief_complaint TEXT NOT NULL, consent_flag BOOLEAN NOT NULL DEFAULT 1, vitals_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS encounters (encounter_id TEXT PRIMARY KEY, patient_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting' CHECK(status IN ('waiting','triaged','in_treatment','discharged','cancelled')), arrival_ts TEXT NOT NULL, source_dataset TEXT NOT NULL DEFAULT 'simulated_patients_v1', surge_batch_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS triage_logs (log_id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id TEXT NOT NULL, ts TEXT NOT NULL, triage_level INTEGER NOT NULL, confidence REAL NOT NULL, escalated_for_uncertainty BOOLEAN NOT NULL, reasoning_path TEXT NOT NULL, degraded_mode BOOLEAN NOT NULL DEFAULT 0, trigger_reason TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS clinician_overrides (override_id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id TEXT NOT NULL, clinician_id TEXT NOT NULL, ts TEXT NOT NULL, ai_recommended_level INTEGER NOT NULL, ai_confidence REAL NOT NULL, overridden_level INTEGER NOT NULL, justification TEXT NOT NULL, jurisdiction TEXT NOT NULL DEFAULT 'HIPAA');
 CREATE TABLE IF NOT EXISTS synaptic_weight_history (update_id INTEGER PRIMARY KEY AUTOINCREMENT, source_node TEXT NOT NULL, target_node TEXT NOT NULL, old_weight REAL NOT NULL, new_weight REAL NOT NULL, triggered_by_override_id INTEGER, ts TEXT NOT NULL);
@@ -37,9 +38,13 @@ def initialise() -> None:
 
 def upsert_patient(payload: dict) -> None:
     with connect() as conn:
+        timestamp = payload.get('arrival_ts', now())
         conn.execute('''INSERT INTO patients(patient_id,age_years,age_band,has_prior_history,arrival_ts,chief_complaint,consent_flag,vitals_json)
             VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(patient_id) DO UPDATE SET age_years=excluded.age_years,age_band=excluded.age_band,has_prior_history=excluded.has_prior_history,chief_complaint=excluded.chief_complaint,vitals_json=excluded.vitals_json''',
-            (payload['patient_id'], payload['age_years'], age_band(payload['age_years']), payload['has_prior_history'], payload.get('arrival_ts', now()), payload['chief_complaint'], True, json.dumps(payload['vitals'])))
+            (payload['patient_id'], payload['age_years'], age_band(payload['age_years']), payload['has_prior_history'], timestamp, payload['chief_complaint'], True, json.dumps(payload['vitals'])))
+        conn.execute('''INSERT INTO encounters(encounter_id,patient_id,status,arrival_ts,source_dataset,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?) ON CONFLICT(encounter_id) DO NOTHING''',
+            (payload['patient_id'], payload['patient_id'], 'waiting', timestamp, 'simulated_patients_v1', timestamp, now()))
 
 
 def log_triage(result: dict) -> None:
@@ -57,7 +62,8 @@ def latest_triage(patient_id: str) -> dict | None:
 def queue_rows() -> list[dict]:
     with connect() as conn:
         rows = conn.execute('''SELECT p.*, t.triage_level,t.confidence,t.escalated_for_uncertainty,t.degraded_mode,t.trigger_reason,t.reasoning_path
-            FROM patients p JOIN triage_logs t ON t.log_id=(SELECT log_id FROM triage_logs WHERE patient_id=p.patient_id ORDER BY log_id DESC LIMIT 1)''').fetchall()
+            FROM patients p JOIN encounters e ON e.patient_id=p.patient_id AND e.status IN ('waiting','triaged')
+            JOIN triage_logs t ON t.log_id=(SELECT log_id FROM triage_logs WHERE patient_id=p.patient_id ORDER BY log_id DESC LIMIT 1)''').fetchall()
         return [dict(row) for row in rows]
 
 
@@ -67,6 +73,7 @@ def delete_patients(patient_ids: list[str]) -> None:
     with connect() as conn:
         placeholders = ','.join('?' for _ in patient_ids)
         conn.execute(f'DELETE FROM triage_logs WHERE patient_id IN ({placeholders})', patient_ids)
+        conn.execute(f'DELETE FROM encounters WHERE patient_id IN ({placeholders})', patient_ids)
         conn.execute(f'DELETE FROM patients WHERE patient_id IN ({placeholders})', patient_ids)
 
 

@@ -1,84 +1,98 @@
 # PatientTriage.ai
 
-A safety-first emergency department triage prototype for the Accenture Innovation Challenge. It is a clinical decision-support demo only, not a diagnostic device or clinical protocol.
+[![Temporary YouTube](https://img.shields.io/badge/YouTube-Karan%20Aujla%20placeholder-FF0000?style=for-the-badge&logo=youtube)](https://www.youtube.com/results?search_query=Karan+Aujla+official+song)
+[![Open Local Demo](https://img.shields.io/badge/Open-Local%20Demo-10b981?style=for-the-badge)](http://localhost:3000)
+[![API Health](https://img.shields.io/badge/API-FastAPI-0a7ea4?style=for-the-badge)](http://localhost:8000/health)
 
-## Run locally
+Safety-first emergency-department triage prototype for the Accenture Innovation Challenge. PatientTriage.ai combines deterministic clinical rules, a NetworkX symptom graph, LangGraph orchestration, optional Groq and Google Gemini calls, queue decay, clinician overrides, and an audit trail.
 
-Open two terminals from this folder:# ROLE & TASK
-Act as a Principal Healthcare Systems Architect, Lead AI/ML Engineer, and Accenture Hackathon Winner. 
+> Fictional clinical decision-support demo only. It is not a diagnostic device, medical advice system, or validated clinical protocol.
 
-Generate an end-to-end, production-grade **Project Master Plan & System Specification Document** for building **"PatientTriage.ai"**—a state-of-the-art emergency department (ED) triage system powered by a **Neuro-Symbolic Agent Graph**.
+## Table of Contents
 
-The output must be deeply technical, complete, and actionable down to exact code signatures, schemas, file structures, and UI layout grids. Avoid hand-waving or high-level summaries.
+- [What We Built](#what-we-built)
+- [How It Works](#how-it-works)
+- [Technology](#technology)
+- [Project Structure](#project-structure)
+- [How to Run Locally](#how-to-run-locally)
+- [Demo Flow](#demo-flow)
+- [Data and Information Safety](#data-and-information-safety)
+- [Optimization](#optimization)
+- [Future Scope](#future-scope)
+- [Limitations](#limitations)
 
----
+## What We Built
 
-## CONTEXT & OBJECTIVES
-* **Competition Context:** Accenture Innovation Challenge 2026 - Round 2 Prototype Development.
-* **Core Problem:** Standard triage tools fail under real-world Emergency Department pressures due to ambiguous symptom presentations, severe age-based vital sign variations (pediatric vs. geriatric), asymmetric cost (under-triage is catastrophic), waiting room deterioration, and clinician alert fatigue.
-* **Core Solution Architecture:** A Neuro-Symbolic Agent Graph. The system translates medical knowledge into a scale-free graph using NetworkX (symptoms as hubs, conditions as terminal nodes). A multi-agent system powered by LangGraph, Groq (Llama 3.1 8B), and Google Gemini Flash traverses this graph to evaluate patients, explicitly surfaces uncertainty, supports instant clinician overrides with dynamic "synaptic plasticity" learning, and handles $3\times$ volume surges via a C++ queue decay engine.
+- Live ED queue with acuity and wait-time decay ranking.
+- LangGraph workflow with four stages: Node Extraction, Demographic Specialist, Safety Adversary, and Synthesizer.
+- Optional Groq symptom extraction and Google Gemini synthesis.
+- Deterministic fallback when providers time out, rate-limit, return invalid data, or are unavailable.
+- NetworkX symptom-to-risk graph that surfaces short paths to critical endpoints.
+- Pediatric, adult, and geriatric calibration rules.
+- Vitals-triggered re-triage.
+- Reversible surge simulation capped at 20 active patients.
+- Clinician override audit trail and synaptic graph-weight updates.
+- SQLite WAL persistence.
+- Full fictional patient catalogue separated from the active hospital queue.
 
----
+## How It Works
 
-## REQUIRED PLAN SECTIONS
+```text
+Frontend: Next.js + React + Cytoscape.js
+        | REST/JSON and queue WebSocket
+        v
+Backend: FastAPI
+        v
+LangGraph workflow
+  |-- Node Extraction: local rules, optional Groq
+  |-- Demographic Specialist: age-aware vital checks
+  |-- Safety Adversary: NetworkX shortest paths
+  |-- Synthesizer: optional Gemini, bounded fallback
+        |
+        +--> SQLite audit store
+        +--> NumPy queue decay
+        +--> Cytoscape reasoning graph
+```
 
-Provide ultra-detailed specs for each of the following 10 sections:
+The complete fictional catalogue lives in `backend/app/mock_data/simulated_patients.json`. SQLite tracks which records are currently active encounters. The catalogue can contain 100 or more records while the live queue contains only the selected patients seeking treatment.
 
-### 1. System Architecture & High-Level Data Topography
-* Complete ASCII diagram illustrating the flow from Frontend (Next.js/Cytoscape.js) $\rightarrow$ REST/WebSocket API (FastAPI) $\rightarrow$ LangGraph Multi-Agent Engine $\rightarrow$ NetworkX Scale-Free Graph $\rightarrow$ C++ Core Queue Worker $\rightarrow$ SQLite Audit Store.
-* Explicit component responsibilities, data contracts, and protocol definitions (HTTP/JSON vs. WebSockets).
+## Technology
 
-### 2. Definitive Tech Stack & Dependency Matrix
-* Complete breakdown of frameworks, versions, and libraries across:
-  * **Frontend:** Next.js (App Router), Tailwind CSS, Lucide Icons, Cytoscape.js, Cytoscape-D3-Force.
-  * **Backend:** Python 3.11+, FastAPI, Uvicorn, NetworkX, Pybind11, Pydantic v2.
-  * **AI Orchestration:** LangGraph, LangChain-Core, Groq API SDK, Google Generative AI SDK.
-  * **Database & Caching:** SQLite3 (WAL mode), Structlog.
-  * **Build & C++ Toolchain:** CMake / Setup.py, GCC/Clang, Pybind11.
-* Direct installation script commands (`pip install`, `npm install`) with exact package lists.
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 14, React 18, TypeScript, Cytoscape.js, Lucide React |
+| API | FastAPI, Uvicorn, Pydantic v2 |
+| Orchestration | LangGraph, LangChain Core |
+| Optional models | Groq SDK, Google `google-genai` SDK |
+| Reasoning graph | NetworkX |
+| Queue math | NumPy: `S_dynamic = S_base * exp(lambda * wait_seconds)` |
+| Storage | SQLite with WAL mode |
+| Logging | Structlog |
 
-### 3. File Directory & Project Structure
-* Full file tree with zero missing directories.
-* Purpose and internal functions/classes for *every single file* in the codebase.
+## Project Structure
 
-### 4. Database Schema, Data Models & Mock Datasets
-* **SQLite Schema:** Complete SQL statements for `patients`, `triage_logs`, `clinician_overrides`, and `synaptic_weight_history` tables (ensuring HIPAA/GDPR auditability).
-* **Pydantic Data Models:** Python class definitions for `PatientInput`, `Vitals`, `TriageResult`, `AgentReasoningPath`, and `OverridePayload`.
-* **Mock Patient Dataset Specs:** Exact JSON schema and 5 detailed sample patient records out of the 20 required (including 1 ambiguous adult presentation, 1 pediatric sepsis case, 1 zero-history trauma case, 1 geriatric confusion case, and 1 surge load case).
+```text
+backend/
+  app/
+    main.py                    FastAPI routes, lifecycle, queue, WebSocket
+    graph/agents.py             LangGraph workflow and model fallbacks
+    graph/symptom_graph.py      NetworkX graph and synaptic updates
+    core/queue_decay.py         Queue decay and vital-delta checks
+    db/database.py              SQLite schema and persistence
+    db/models.py                Pydantic request/result models
+    mock_data/simulated_patients.json  Fictional master catalogue
+  requirements.txt
+frontend/
+  src/app/page.tsx              Clinical HUD shell
+  src/components/               Queue, graph, surge, override, banner UI
+  src/lib/api.ts                Typed API client
+  package.json
+PATIENT_TRIAGE_FEATURES_AND_ROADMAP.md  Feature and improvement plan
+```
 
-### 5. Multi-Agent Engine Architecture (LangGraph Deep-Dive)
-* **Agent Graph State Schema:** Exact Python TypedDict representing the `TriageState`.
-* **Individual Agent Specs & Prompts:**
-  1. *Node Extraction Agent (Groq / Llama 3.1 8B):* System prompt, extraction format, parsing logic.
-  2. *Demographic Specialist Agent:* Precise physiological vital threshold tables for Pediatric ($<12$), Adult ($12\text{--}65$), and Geriatric ($>65$).
-  3. *Safety Adversary Agent:* Shortest-path search algorithm across the graph to prove worst-case differential diagnoses.
-  4. *Synthesizer Agent (Gemini Flash):* Decision logic matrix, epistemic uncertainty formula, and automatic +1 level escalation trigger rules when confidence is $<70\%$.
+## How to Run Locally
 
-### 6. Dynamic Algorithms & Algorithmic Mechanics
-* **Synaptic Plasticity Formula:** Mathematical specification and Python function for modifying NetworkX edge weights when a clinician overrides an AI output.
-* **C++ High-Performance Queue Core:** Complete C++ source code (`queue_decay.cpp`) and Pybind11 binding file (`cpp_bindings.cpp`) calculating wait-time score inflation ($S_{\text{dynamic}} = S_{\text{base}} \times e^{\lambda t}$) during simulated $3\times$ volume surges.
-
-### 7. Frontend UI/UX & Clinical HUD Layout Specs
-* **Visual Palette:** HEX codes, Tailwind classes for dark clinical dark-green aesthetic (`#0a1f1c`), mint status badges (`#10b981`), high-risk flags (`#ef4444`), and graph node styles.
-* **Component Specs:**
-  * `CytoscapeGraph.tsx`: Node styling rules, animated edge traversal logic, layout algorithms.
-  * `PatientCard.tsx`: Vitals display layout, confidence bar visualizer, level indicator.
-  * `SurgeToggle.tsx`: Trigger mechanism for real-time background queue flooding.
-  * `OverrideModal.tsx`: UX flow for logging nurse reasoning and firing synaptic update API calls.
-
-### 8. Phase-by-Phase Build & Implementation Roadmap
-* Step-by-step coding plan broken down into 4 discrete phases (designed for a tight hackathon timeline):
-  * **Phase 1 (Hours 0-4):** Graph setup, C++ bindings, SQLite schemas, FastAPI foundation.
-  * **Phase 2 (Hours 4-10):** LangGraph multi-agent flow, prompt tuning, free API integrations.
-  * **Phase 3 (Hours 10-16):** Next.js dashboard, Cytoscape graph rendering, live WebSockets/polling.
-  * **Phase 4 (Hours 16-20):** Mock dataset generation (20 cases), surge simulation tuning, pitch polish.
-
-### 9. Edge-Case Validation & Failure Mode Matrix
-* Table covering potential technical failure points (API rate limits, missing patient vitals, invalid graph traversals, C++ build failures) and their programmatic fail-safes.
-
-### 10. Pitch Deck Strategy & Live Demo Script
-* 3-minute presentation slide breakdown (5 slides max).
-* Step-by-step live demo script outlining the exact sequence of clicks, simulated edge cases to showcase to the judges, and verbal talking points that prove technical novelty and clinical safety.
+### Backend
 
 ```powershell
 cd backend
@@ -88,24 +102,90 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
+### Frontend
+
 ```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
-Open http://localhost:3000. The frontend expects the API at http://localhost:8000; override this with `NEXT_PUBLIC_API_URL`.
+Open http://localhost:3000. The API is available at http://localhost:8000 and health checks are available at http://localhost:8000/health.
 
-## Demo flow
+## Optional LLM Mode
 
-1. Open P001 to see an ambiguous, low-pain possible cardiac presentation escalated by the safety adversary.
-2. Enable surge mode to inject waiting-room patients and watch priority decay re-sort the queue.
-3. Select a patient and press **Worsen vitals** to force an immediate vitals-triggered re-triage.
-4. Open **Clinician override**, enter a 10+ character rationale, and submit. The audit record and graph learning signal update.
-5. Toggle **Fail-safe demo** to make new assessments visibly use deterministic rule-based scoring.
+LLM mode is disabled by default. For fictional or approved de-identified demo data, configure `backend/.env`:
 
-## Design notes
+```env
+TRIAGE_USE_LLM=true
+GROQ_API_KEY=your-key
+GOOGLE_API_KEY=your-key
+GROQ_MODEL=openai/gpt-oss-20b
+GEMINI_MODEL=gemini-3-flash-preview
+TRIAGE_MAX_CONCURRENT_CALLS=4
+TRIAGE_LLM_PATIENT_BUDGET=5
+```
 
-- SQLite runs in WAL mode and stores patient, triage, override, and synaptic-weight audit history.
-- The orchestrator uses a deterministic, explainable four-stage neuro-symbolic flow (symptom extraction, demographic calibration, safety adversary, synthesis). It is intentionally offline-ready; an external LLM wrapper can be added without changing the API contract.
-- No patient data is sent to a third party by this prototype. The sample data is fictional.
+The system uses local rules first. Providers are reserved for ambiguous cases, limited by concurrency and budget, cached where possible, and protected by a circuit breaker. Provider failures return a valid deterministic result with `degraded_mode=true`.
+
+Never commit `.env` or paste API keys into source control, screenshots, or chat.
+
+## Demo Flow
+
+1. Open P001 to show an ambiguous low-pain presentation with a cardiac safety path.
+2. Enable the 3x surge to activate additional catalogue patients.
+3. Select a patient and use **Worsen vitals & re-triage**.
+4. Open **Clinician override**, provide a rationale, and submit it.
+5. Toggle **Fail-safe demo** to demonstrate deterministic operation when AI is unavailable.
+
+## API Endpoints
+
+| Endpoint | Method | Purpose |
+|---|---:|---|
+| `/health` | GET | Service health and fail-safe state |
+| `/queue` | GET | Active ranked queue |
+| `/graph` | GET | Cytoscape graph data |
+| `/triage/intake` | POST | Assess a patient |
+| `/patients/{patient_id}/vitals` | POST | Update vitals and reassess |
+| `/surge` | POST | Activate or reset a simulated surge |
+| `/demo/failsafe` | POST | Toggle deterministic demo mode |
+| `/override` | POST | Record clinician override and graph update |
+| `/ws/queue` | WebSocket | Stream queue snapshots |
+
+## Data and Information Safety
+
+The repository contains fictional data only. With LLM mode enabled, selected complaint text and vitals are sent to configured external providers, so this configuration is not automatically suitable for real patient information.
+
+Before real hospital use, the project would require private or approved provider endpoints, encryption, authentication, role-based access, secrets management, audit controls, data retention policies, security testing, clinical validation, and hospital privacy approval.
+
+## Optimization
+
+The project is optimized around a 20-patient active hospital simulation:
+
+- The catalogue is independent from active encounters.
+- Clear cases use deterministic local processing.
+- Ambiguous cases use LLMs selectively.
+- Queue refreshes and ranking make no external provider calls.
+- Provider concurrency defaults to four.
+- Provider budgets default to five calls per backend process.
+- Successful results are cached.
+- Quota failures activate a cooldown and immediately use fallback.
+
+## Future Scope
+
+See [PATIENT_TRIAGE_FEATURES_AND_ROADMAP.md](PATIENT_TRIAGE_FEATURES_AND_ROADMAP.md) for the full feature plan. The highest-value next steps are:
+
+- Add structured data-quality and missing-field explanations.
+- Expand and version the symptom library with aliases.
+- Add a tested, transparent ranking formula with score components.
+- Add richer explanations, evidence IDs, and counterfactuals.
+- Add encounter lifecycle states such as waiting, in treatment, discharged, and cancelled.
+- Add automated integration, safety, load, and fallback tests.
+
+## Limitations
+
+- The dataset is fictional and not clinically validated.
+- Thresholds are illustrative and are not a substitute for hospital protocols.
+- SQLite is suitable for this prototype, not a production hospital deployment.
+- AI output must remain clinician-reviewable and must not be treated as a diagnosis.
+- ROI and clinical benefit require prospective validation.

@@ -21,7 +21,7 @@ export default function CytoscapeGraph({ patient }: { patient: Patient | undefin
         cy = cytoscape({
           container: ref.current,
           elements: [
-            ...data.nodes.map((node: any) => ({ ...node, classes: active.has(node.data.id) ? 'active' : '' })),
+            ...data.nodes.map((node: any, index: number) => ({ ...node, position: { x: 80 + (index % 6) * 150, y: 60 + Math.floor(index / 6) * 105 }, classes: active.has(node.data.id) ? 'active' : '' })),
             ...data.edges.map((edge: any) => ({
               ...edge,
               classes: active.has(edge.data.source) && active.has(edge.data.target) ? 'active' : '',
@@ -34,7 +34,7 @@ export default function CytoscapeGraph({ patient }: { patient: Patient | undefin
             { selector: 'edge', style: { width: 1, 'line-color': '#2b5750', 'curve-style': 'bezier' } },
             { selector: '.active', style: { 'background-color': '#f59e0b', 'line-color': '#f59e0b', width: 3 } },
           ],
-          layout: { name: 'cose', animate: false, padding: 24 },
+          layout: { name: 'preset', padding: 24 },
         });
       })
       .catch((error) => {
@@ -48,5 +48,5 @@ export default function CytoscapeGraph({ patient }: { patient: Patient | undefin
     };
   }, [patient]);
 
-  return <div className="graph" ref={ref} />;
+  return <div className="graph-wrap"><div className="graph-heading"><div><strong>Symptom graph</strong><span>Amber nodes and edges are the evidence path for {patient?.patient_id || 'the selected patient'}.</span></div><small>Green = risk hub · red = critical endpoint · muted = available graph knowledge</small></div><div className="graph" ref={ref} /></div>;
 }

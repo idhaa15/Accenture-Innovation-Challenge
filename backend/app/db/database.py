@@ -9,8 +9,8 @@ DB_PATH = Path(__file__).resolve().parents[2] / 'patient_triage.db'
 
 SCHEMA = '''
 PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS patients (patient_id TEXT PRIMARY KEY, age_years INTEGER NOT NULL, age_band TEXT NOT NULL, has_prior_history BOOLEAN NOT NULL, arrival_ts TEXT NOT NULL, chief_complaint TEXT NOT NULL, patient_name TEXT NOT NULL DEFAULT '', consent_flag BOOLEAN NOT NULL DEFAULT 1, vitals_json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS encounters (encounter_id TEXT PRIMARY KEY, patient_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting' CHECK(status IN ('waiting','triaged','in_treatment','discharged','cancelled')), arrival_ts TEXT NOT NULL, source_dataset TEXT NOT NULL DEFAULT 'simulated_patients_v1', surge_batch_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS patients (patient_id TEXT PRIMARY KEY, age_years INTEGER NOT NULL, age_band TEXT NOT NULL, has_prior_history BOOLEAN NOT NULL, arrival_ts TEXT NOT NULL, chief_complaint TEXT NOT NULL, patient_name TEXT NOT NULL DEFAULT '', gender TEXT NOT NULL DEFAULT 'Not specified', pronouns TEXT NOT NULL DEFAULT '', preferred_language TEXT NOT NULL DEFAULT 'English', consent_flag BOOLEAN NOT NULL DEFAULT 1, vitals_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS encounters (encounter_id TEXT PRIMARY KEY, patient_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting' CHECK(status IN ('waiting','triaged','in_treatment','discharged','cancelled')), arrival_ts TEXT NOT NULL, source_dataset TEXT NOT NULL DEFAULT 'simulated_patients_v1', surge_batch_id TEXT, reassessment_interval_seconds INTEGER NOT NULL DEFAULT 300, last_reassessment_at TEXT, next_reassessment_at TEXT, reassessment_due BOOLEAN NOT NULL DEFAULT 0, deteriorating BOOLEAN NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS triage_logs (log_id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id TEXT NOT NULL, ts TEXT NOT NULL, triage_level INTEGER NOT NULL, confidence REAL NOT NULL, escalated_for_uncertainty BOOLEAN NOT NULL, reasoning_path TEXT NOT NULL, degraded_mode BOOLEAN NOT NULL DEFAULT 0, trigger_reason TEXT NOT NULL, explanation_json TEXT NOT NULL DEFAULT '{}', recommended_department TEXT NOT NULL DEFAULT 'General ED', routing_confidence TEXT NOT NULL DEFAULT 'heuristic', data_quality_json TEXT NOT NULL DEFAULT '{}', disclaimer TEXT NOT NULL DEFAULT 'Decision support only. Not a validated diagnostic device. Graph-based reasoning is a heuristic, not a licensed clinical protocol.');
 CREATE TABLE IF NOT EXISTS clinician_overrides (override_id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id TEXT NOT NULL, clinician_id TEXT NOT NULL, ts TEXT NOT NULL, ai_recommended_level INTEGER NOT NULL, ai_confidence REAL NOT NULL, overridden_level INTEGER NOT NULL, justification TEXT NOT NULL, jurisdiction TEXT NOT NULL DEFAULT 'HIPAA');
 CREATE TABLE IF NOT EXISTS synaptic_weight_history (update_id INTEGER PRIMARY KEY AUTOINCREMENT, source_node TEXT NOT NULL, target_node TEXT NOT NULL, old_weight REAL NOT NULL, new_weight REAL NOT NULL, triggered_by_override_id INTEGER, ts TEXT NOT NULL);
@@ -49,17 +49,33 @@ def initialise() -> None:
         patient_columns = {row['name'] for row in conn.execute('PRAGMA table_info(patients)')}
         if 'patient_name' not in patient_columns:
             conn.execute("ALTER TABLE patients ADD COLUMN patient_name TEXT NOT NULL DEFAULT ''")
+        for name, definition in {'gender': "TEXT NOT NULL DEFAULT 'Not specified'", 'pronouns': "TEXT NOT NULL DEFAULT ''", 'preferred_language': "TEXT NOT NULL DEFAULT 'English'"}.items():
+            if name not in patient_columns:
+                conn.execute(f'ALTER TABLE patients ADD COLUMN {name} {definition}')
+        encounter_columns = {row['name'] for row in conn.execute('PRAGMA table_info(encounters)')}
+        additions = {
+            'reassessment_interval_seconds': 'INTEGER NOT NULL DEFAULT 300',
+            'last_reassessment_at': 'TEXT',
+            'next_reassessment_at': 'TEXT',
+            'reassessment_due': 'BOOLEAN NOT NULL DEFAULT 0',
+            'deteriorating': 'BOOLEAN NOT NULL DEFAULT 0',
+        }
+        for name, definition in additions.items():
+            if name not in encounter_columns:
+                conn.execute(f'ALTER TABLE encounters ADD COLUMN {name} {definition}')
+        conn.execute("UPDATE encounters SET next_reassessment_at=COALESCE(next_reassessment_at, datetime(arrival_ts, '+5 minutes'))")
 
 
 def upsert_patient(payload: dict) -> None:
     with connect() as conn:
         timestamp = payload.get('arrival_ts', now())
-        conn.execute('''INSERT INTO patients(patient_id,age_years,age_band,has_prior_history,arrival_ts,chief_complaint,patient_name,consent_flag,vitals_json)
-            VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(patient_id) DO UPDATE SET age_years=excluded.age_years,age_band=excluded.age_band,has_prior_history=excluded.has_prior_history,chief_complaint=excluded.chief_complaint,patient_name=excluded.patient_name,vitals_json=excluded.vitals_json''',
-            (payload['patient_id'], payload['age_years'], age_band(payload['age_years']), payload['has_prior_history'], timestamp, payload['chief_complaint'], payload.get('patient_name', ''), True, json.dumps(payload['vitals'])))
-        conn.execute('''INSERT INTO encounters(encounter_id,patient_id,status,arrival_ts,source_dataset,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?) ON CONFLICT(encounter_id) DO NOTHING''',
-            (payload['patient_id'], payload['patient_id'], 'waiting', timestamp, 'simulated_patients_v1', timestamp, now()))
+        conn.execute('''INSERT INTO patients(patient_id,age_years,age_band,has_prior_history,arrival_ts,chief_complaint,patient_name,gender,pronouns,preferred_language,consent_flag,vitals_json)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(patient_id) DO UPDATE SET age_years=excluded.age_years,age_band=excluded.age_band,has_prior_history=excluded.has_prior_history,chief_complaint=excluded.chief_complaint,patient_name=excluded.patient_name,gender=excluded.gender,pronouns=excluded.pronouns,preferred_language=excluded.preferred_language,vitals_json=excluded.vitals_json''',
+            (payload['patient_id'], payload['age_years'], age_band(payload['age_years']), payload['has_prior_history'], timestamp, payload['chief_complaint'], payload.get('patient_name', ''), payload.get('gender', 'Not specified'), payload.get('pronouns', ''), payload.get('preferred_language', 'English'), True, json.dumps(payload['vitals'])))
+        next_check = (datetime.fromisoformat(timestamp) + timedelta(minutes=5)).isoformat()
+        conn.execute('''INSERT INTO encounters(encounter_id,patient_id,status,arrival_ts,source_dataset,next_reassessment_at,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(encounter_id) DO NOTHING''',
+            (payload['patient_id'], payload['patient_id'], 'waiting', timestamp, 'simulated_patients_v1', next_check, timestamp, now()))
 
 
 def log_triage(result: dict) -> None:
@@ -76,10 +92,48 @@ def latest_triage(patient_id: str) -> dict | None:
 
 def queue_rows() -> list[dict]:
     with connect() as conn:
-        rows = conn.execute('''SELECT p.*, t.triage_level,t.confidence,t.escalated_for_uncertainty,t.degraded_mode,t.trigger_reason,t.reasoning_path,t.explanation_json,t.recommended_department,t.routing_confidence,t.data_quality_json,t.disclaimer
+        rows = conn.execute('''SELECT p.*, e.reassessment_interval_seconds,e.last_reassessment_at,e.next_reassessment_at,e.reassessment_due,e.deteriorating, t.triage_level,t.confidence,t.escalated_for_uncertainty,t.degraded_mode,t.trigger_reason,t.reasoning_path,t.explanation_json,t.recommended_department,t.routing_confidence,t.data_quality_json,t.disclaimer
             FROM patients p JOIN encounters e ON e.patient_id=p.patient_id AND e.status IN ('waiting','triaged')
             JOIN triage_logs t ON t.log_id=(SELECT log_id FROM triage_logs WHERE patient_id=p.patient_id ORDER BY log_id DESC LIMIT 1)''').fetchall()
         return [dict(row) for row in rows]
+
+
+def refresh_reassessment_due() -> int:
+    with connect() as conn:
+        cur = conn.execute("""UPDATE encounters
+            SET reassessment_due=1, updated_at=?
+            WHERE status IN ('waiting','triaged') AND reassessment_due=0
+              AND next_reassessment_at IS NOT NULL AND next_reassessment_at <= ?""", (now(), now()))
+        return cur.rowcount
+
+
+def complete_reassessment(patient_id: str, deteriorating: bool) -> None:
+    with connect() as conn:
+        row = conn.execute('SELECT reassessment_interval_seconds FROM encounters WHERE patient_id=?', (patient_id,)).fetchone()
+        if not row:
+            return
+        timestamp = datetime.now(timezone.utc)
+        next_check = timestamp + timedelta(seconds=row['reassessment_interval_seconds'])
+        conn.execute('''UPDATE encounters SET last_reassessment_at=?, next_reassessment_at=?, reassessment_due=0,
+            deteriorating=?, updated_at=? WHERE patient_id=?''', (timestamp.isoformat(), next_check.isoformat(), deteriorating, timestamp.isoformat(), patient_id))
+
+
+def set_reassessment_interval(patient_id: str, seconds: int) -> None:
+    with connect() as conn:
+        timestamp = datetime.now(timezone.utc)
+        conn.execute('''UPDATE encounters SET reassessment_interval_seconds=?, next_reassessment_at=?, reassessment_due=0,
+            updated_at=? WHERE patient_id=?''', (seconds, (timestamp + timedelta(seconds=seconds)).isoformat(), timestamp.isoformat(), patient_id))
+
+
+def set_encounter_status(patient_id: str, status: str) -> None:
+    with connect() as conn:
+        conn.execute('UPDATE encounters SET status=?, updated_at=? WHERE patient_id=?', (status, now(), patient_id))
+
+
+def active_patient_inputs() -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute("SELECT p.patient_id,p.patient_name,p.gender,p.pronouns,p.preferred_language,p.age_years,p.has_prior_history,p.chief_complaint,p.vitals_json FROM patients p JOIN encounters e ON e.patient_id=p.patient_id AND e.status IN ('waiting','triaged')").fetchall()
+        return [{**dict(row), 'vitals': json.loads(row['vitals_json'])} for row in rows]
 
 
 def delete_patients(patient_ids: list[str]) -> None:

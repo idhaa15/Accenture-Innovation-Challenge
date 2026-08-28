@@ -10,7 +10,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.queue_decay import check_vitals_re_triage, recompute_queue
+from app.core.queue_decay import check_vitals_re_triage, within_bucket_priority
 from app.db import database
 from app.db.models import OverridePayload, PatientInput, SurgePayload, VitalsUpdate
 from app.graph.agents import PROVIDER_CALL_COUNTS, triage
@@ -22,26 +22,38 @@ SURGE_ACTIVE = False
 
 
 def serialise_queue() -> list[dict]:
+    database.refresh_reassessment_due()
     rows = database.queue_rows()
     if not rows: return []
     now = datetime.now(timezone.utc)
     waits = np.array([max(0, (now - datetime.fromisoformat(row['arrival_ts'])).total_seconds()) for row in rows])
-    base = np.array([6 - row['triage_level'] for row in rows], dtype=float)
-    dynamic = recompute_queue(base, waits)
+    intervals = np.array([row.get('reassessment_interval_seconds') or 300 for row in rows], dtype=float)
+    fairness = within_bucket_priority(waits, intervals)
     items = []
-    for row, score, wait in zip(rows, dynamic, waits):
+    for row, score, wait in zip(rows, fairness, waits):
         row['vitals'] = json.loads(row.pop('vitals_json'))
         row['reasoning_path'] = json.loads(row['reasoning_path'])
         row['explanation'] = json.loads(row.pop('explanation_json', '{}'))
         row['data_quality'] = json.loads(row.pop('data_quality_json', '{}'))
         row['wait_seconds'] = int(wait); row['dynamic_score'] = round(float(score), 2)
         items.append(row)
-    return sorted(items, key=lambda item: item['dynamic_score'], reverse=True)
+    # Acuity is a hard boundary. The following safety signals order only within
+    # the same ESI-style level: detected deterioration, overdue reassessment,
+    # then capped waiting-time fairness.
+    return sorted(items, key=lambda item: (
+        item['triage_level'],
+        not bool(item.get('deteriorating')),
+        not bool(item.get('reassessment_due')),
+        -item['dynamic_score'],
+        -item['wait_seconds'],
+        item['arrival_ts'],
+    ))
 
 
 async def assess(payload: dict, trigger: str = 'intake') -> dict:
     result = await triage(payload, GRAPH, FAILSAFE_MODE, trigger)
     database.upsert_patient(payload); database.log_triage(result)
+    database.complete_reassessment(payload['patient_id'], trigger == 'vitals_change')
     return result
 
 
@@ -71,6 +83,10 @@ async def lifespan(app: FastAPI):
     if not database.queue_rows():
         records = json.loads((Path(__file__).parent / 'mock_data' / 'simulated_patients.json').read_text())
         await assess_many(records[:5])
+    else:
+        legacy = [patient for patient in database.active_patient_inputs() if not json.loads(database.latest_triage(patient['patient_id']).get('explanation_json', '{}'))]
+        if legacy:
+            await assess_many(legacy)
     yield
 
 
@@ -104,7 +120,7 @@ async def update_vitals(patient_id: str, update: VitalsUpdate):
     payload = {**patient, 'vitals': current}
     payload.pop('vitals_json', None); payload.pop('age_band', None); payload.pop('arrival_ts', None); payload.pop('consent_flag', None)
     fired = check_vitals_re_triage(current, prior, database.age_band(patient['age_years']))
-    result = await assess(payload, 'vitals_change' if fired else 'intake')
+    result = await assess(payload, 'vitals_change' if fired else 'reassessment')
     return {'reassessment_fired': fired, 'result': result}
 
 
@@ -148,8 +164,7 @@ def graph():
     return {'nodes': [{'data': {'id': n, 'label': n.replace('_', ' '), 'kind': d['kind']}} for n, d in GRAPH.nodes(data=True)], 'edges': [{'data': {'id': f'{a}-{b}', 'source': a, 'target': b, 'weight': d['weight']}} for a,b,d in GRAPH.edges(data=True)]}
 
 
-@app.post('/override')
-def override(payload: OverridePayload):
+def _apply_clinician_level(payload: OverridePayload, action_type: str) -> dict:
     latest = database.latest_triage(payload.patient_id)
     if not latest: raise HTTPException(404, 'No assessment found for this patient')
     delta = 1 if payload.overridden_level < latest['triage_level'] else -1 if payload.overridden_level > latest['triage_level'] else 0
@@ -160,19 +175,41 @@ def override(payload: OverridePayload):
         old, new = synaptic_update(GRAPH, source, target, delta)
         if old != new: updates.append({'source': source, 'target': target, 'old_weight': old, 'new_weight': new})
     override_id = database.record_override_with_weights(payload.patient_id, payload.clinician_id, latest['triage_level'], latest['confidence'], payload.overridden_level, payload.justification, payload.jurisdiction, [(item['source'], item['target'], item['old_weight'], item['new_weight']) for item in updates])
-    return {'override_id': override_id, 'audit_logged': True, 'weight_updates': updates}
+    reasoning = json.loads(latest['reasoning_path'])
+    reasoning.append({'agent_name': 'Clinician decision', 'graph_nodes_visited': [], 'conclusion': f'{action_type.replace("_", " ").title()}: Level {payload.overridden_level}. {payload.justification}', 'confidence_delta': 0.0})
+    explanation = json.loads(latest['explanation_json'])
+    explanation['summary'] = f'Clinician-set Level {payload.overridden_level}: {payload.justification}'
+    explanation.setdefault('evidence', []).append('Clinician decision is the active queue priority.')
+    explanation['why_this_level'] = 'A licensed clinician supplied a documented queue decision.'
+    database.log_triage({
+        'patient_id': payload.patient_id, 'updated_at': datetime.now(timezone.utc).isoformat(),
+        'triage_level': payload.overridden_level, 'confidence': 1.0,
+        'escalated_for_uncertainty': payload.overridden_level <= 2, 'degraded_mode': False,
+        'reasoning_path': reasoning, 'trigger_reason': action_type,
+        'explanation': explanation, 'recommended_department': latest['recommended_department'],
+        'routing_confidence': 'high', 'data_quality': json.loads(latest['data_quality_json']),
+        'disclaimer': latest['disclaimer'],
+    })
+    database.complete_reassessment(payload.patient_id, payload.overridden_level < latest['triage_level'])
+    return {'override_id': override_id, 'triage_level': payload.overridden_level, 'audit_logged': True, 'weight_updates': updates}
+
+
+@app.post('/override')
+def override(payload: OverridePayload):
+    return _apply_clinician_level(payload, 'clinician_override')
 
 
 @app.post('/encounters/{patient_id}/accept')
 def accept(patient_id: str, actor: str = 'clinician'):
     if not database.latest_triage(patient_id): raise HTTPException(404, 'No assessment found for this patient')
+    database.set_encounter_status(patient_id, 'in_treatment')
     return {'action_id': database.record_action(patient_id, actor, 'accept', {'status': 'accepted'}), 'audit_logged': True}
 
 
 @app.post('/encounters/{patient_id}/override')
 def encounter_override(patient_id: str, payload: OverridePayload):
     if payload.patient_id != patient_id: raise HTTPException(400, 'Patient identifier mismatch')
-    result = override(payload)
+    result = _apply_clinician_level(payload, 'clinician_override')
     database.record_action(patient_id, payload.clinician_id, 'override', {'override_id': result['override_id'], 'justification': payload.justification})
     return result
 
@@ -181,8 +218,9 @@ def encounter_override(patient_id: str, payload: OverridePayload):
 def escalate_now(patient_id: str, actor: str = 'clinician'):
     latest = database.latest_triage(patient_id)
     if not latest: raise HTTPException(404, 'No assessment found for this patient')
-    action_id = database.record_action(patient_id, actor, 'escalate-now', {'level': 1, 'reason': 'manual escalation'})
-    return {'action_id': action_id, 'triage_level': 1, 'audit_logged': True}
+    result = _apply_clinician_level(OverridePayload(patient_id=patient_id, clinician_id=actor, overridden_level=1, justification='Manual immediate escalation by clinician.', jurisdiction='HIPAA'), 'manual_escalation')
+    result['action_id'] = database.record_action(patient_id, actor, 'escalate-now', {'level': 1, 'reason': 'manual escalation'})
+    return result
 
 
 @app.post('/encounters/{patient_id}/answer')
@@ -193,7 +231,7 @@ async def answer(patient_id: str, answer: dict):
     if field not in {'heart_rate', 'resp_rate', 'spo2', 'temp_c', 'systolic_bp'}: raise HTTPException(400, 'Only vital fields can be answered')
     vitals[field] = value
     payload = {key: patient[key] for key in ('patient_id', 'age_years', 'has_prior_history', 'chief_complaint')}; payload['vitals'] = vitals
-    result = await assess(payload, 'vitals_change')
+    result = await assess(payload, 'reassessment')
     database.record_action(patient_id, answer.get('actor', 'clinician'), 'answer', {'field': field})
     return result
 
@@ -209,7 +247,8 @@ def reassessment_interval(patient_id: str, payload: dict):
     if not database.get_patient(patient_id): raise HTTPException(404, 'Patient not found')
     seconds = payload.get('seconds')
     if not isinstance(seconds, int) or seconds < 10 or seconds > 3600: raise HTTPException(400, 'seconds must be between 10 and 3600')
-    return {'action_id': database.record_action(patient_id, payload.get('actor', 'clinician'), 'reassessment-interval', {'seconds': seconds}), 'audit_logged': True}
+    database.set_reassessment_interval(patient_id, seconds)
+    return {'action_id': database.record_action(patient_id, payload.get('actor', 'clinician'), 'reassessment-interval', {'seconds': seconds}), 'next_reassessment_scheduled': True, 'audit_logged': True}
 
 
 @app.websocket('/ws/queue')

@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import time
+from collections import deque
 from datetime import datetime, timezone
 from operator import add
 from typing import Annotated, Any, TypedDict
@@ -33,17 +34,27 @@ KEYWORDS = {
 GRAPH_LABELS = frozenset(KEYWORDS) | {'low_spo2', 'tachycardia', 'low_bp'}
 AMBIGUOUS_TERMS = ('vague', 'possible', 'maybe', 'unknown', 'not sure', 'unclear', 'atypical')
 PROVIDER_CONCURRENCY = max(1, int(os.getenv('TRIAGE_MAX_CONCURRENT_CALLS', '4')))
-LLM_PATIENT_BUDGET = max(0, int(os.getenv('TRIAGE_LLM_PATIENT_BUDGET', '5')))
+LLM_CALLS_PER_MINUTE = max(1, int(os.getenv('TRIAGE_LLM_CALLS_PER_MINUTE', '12')))
 PROVIDER_SEMAPHORE = asyncio.Semaphore(PROVIDER_CONCURRENCY)
 TRIAGE_CACHE: dict[str, dict[str, Any]] = {}
 PROVIDER_BLOCKED_UNTIL = {'groq': 0.0, 'google': 0.0}
 PROVIDER_CALL_COUNTS = {'groq': 0, 'google': 0}
+PROVIDER_CALL_TIMES = {'groq': deque(), 'google': deque()}
 ROUTING = {'myocardial_infarction': 'Cardiology', 'stroke': 'Neurology', 'sepsis': 'Internal Medicine / ICU', 'respiratory_failure': 'Pulmonology', 'internal_bleeding': 'General Surgery'}
 DISCLAIMER = 'Decision support only. Not a validated diagnostic device. Graph-based reasoning is a heuristic, not a licensed clinical protocol.'
 
 
 def _provider_available(name: str) -> bool:
-    return time.monotonic() >= PROVIDER_BLOCKED_UNTIL[name] and PROVIDER_CALL_COUNTS[name] < LLM_PATIENT_BUDGET
+    calls = PROVIDER_CALL_TIMES[name]
+    cutoff = time.monotonic() - 60
+    while calls and calls[0] < cutoff:
+        calls.popleft()
+    return time.monotonic() >= PROVIDER_BLOCKED_UNTIL.get(name, 0.0) and len(calls) < LLM_CALLS_PER_MINUTE
+
+
+def _record_provider_call(name: str) -> None:
+    PROVIDER_CALL_TIMES[name].append(time.monotonic())
+    PROVIDER_CALL_COUNTS[name] += 1
 
 
 def _block_provider(name: str, seconds: float = 30.0) -> None:
@@ -96,63 +107,15 @@ def _parse_json(content: str) -> dict[str, Any]:
     return value
 
 
-async def _groq_extract(patient: dict[str, Any]) -> list[str]:
-    from groq import AsyncGroq
-
-    client = AsyncGroq(api_key=os.environ['GROQ_API_KEY'])
-    PROVIDER_CALL_COUNTS['groq'] += 1
-    async with PROVIDER_SEMAPHORE:
-        response = await client.chat.completions.create(
-            model=os.getenv('GROQ_MODEL', 'openai/gpt-oss-20b'),
-            messages=[
-                {'role': 'system', 'content': f'Return JSON only: {{"symptoms": [labels]}}. Use only these labels: {sorted(GRAPH_LABELS)}.'},
-                {'role': 'user', 'content': json.dumps({'chief_complaint': patient['chief_complaint'], 'vitals': patient['vitals']})},
-            ],
-            temperature=0,
-            response_format={'type': 'json_object'},
-            timeout=float(os.getenv('TRIAGE_LLM_TIMEOUT_SECONDS', '10')),
-        )
-    parsed = _parse_json(response.choices[0].message.content or '{}')
-    symptoms = parsed.get('symptoms')
-    if not isinstance(symptoms, list):
-        raise ValueError('Model response did not contain a symptom list')
-    return [item for item in symptoms if isinstance(item, str) and item in GRAPH_LABELS]
-
-
-async def _gemini_synthesize(state: TriageState) -> tuple[int, float, bool]:
-    from google import genai
-
-    client = genai.Client(api_key=os.environ['GOOGLE_API_KEY'])
-    PROVIDER_CALL_COUNTS['google'] += 1
-    prompt = {
-        'instruction': 'Return JSON only with triage_level (1-5), confidence (0-1), escalated (boolean). Level 1 is most urgent. Never reduce urgency below the worst-case safety level.',
-        'demographic_flags': state.get('demographic_flags', []),
-        'demographic_level': state.get('demographic_level', 5),
-        'worst_case_path': state.get('worst_case_path', []),
-        'adversary_level': state.get('adversary_level', 5),
-        'base_confidence': state.get('base_confidence', .35),
-    }
-    async with PROVIDER_SEMAPHORE:
-        response = await asyncio.wait_for(client.aio.models.generate_content(model=os.getenv('GEMINI_MODEL', 'gemini-3-flash-preview'), contents=json.dumps(prompt)), timeout=float(os.getenv('TRIAGE_LLM_TIMEOUT_SECONDS', '10')))
-    parsed = _parse_json(response.text or '{}')
-    level = int(parsed['triage_level'])
-    confidence = float(parsed['confidence'])
-    if level not in range(1, 6) or not 0 <= confidence <= 1:
-        raise ValueError('Model synthesis was outside the supported range')
-    return level, confidence, bool(parsed.get('escalated', confidence < .70))
-
-
 async def _extract_node(state: TriageState) -> dict[str, Any]:
     patient = state['patient_input']
     symptoms = extract_symptoms(patient)
     degraded = state.get('degraded_mode', False)
     complaint = patient['chief_complaint'].lower()
     use_model = _llm_enabled() and (not symptoms or len(symptoms) >= 3 or any(term in complaint for term in AMBIGUOUS_TERMS))
-    if use_model and not os.getenv('GROQ_API_KEY'):
-        degraded = True
-    elif use_model and os.getenv('GROQ_API_KEY') and _provider_available('groq'):
+    if use_model and llm_provider.groq_configured() and _provider_available('groq'):
         try:
-            PROVIDER_CALL_COUNTS[llm_provider.provider()] = PROVIDER_CALL_COUNTS.get(llm_provider.provider(), 0) + 1
+            _record_provider_call('groq')
             symptoms = list(dict.fromkeys(await llm_provider.extract(patient, sorted(GRAPH_LABELS)))) or symptoms
         except Exception as exc:
             degraded = True
@@ -207,14 +170,23 @@ async def _adversary_node(state: TriageState) -> dict[str, Any]:
         if symptom not in graph: continue
         for critical in CRITICAL_NODES:
             try:
-                path = nx.shortest_path(graph, symptom, critical)
+                path = nx.shortest_path(graph, symptom, critical, weight=lambda _a, _b, edge: 1 / max(.05, edge.get('weight', .5)))
                 if len(path) <= 3: paths.append(' -> '.join(path))
             except nx.NetworkXNoPath:
                 pass
     paths = paths[:4]
-    level = 1 if any('respiratory_failure' in path or 'internal_bleeding' in path for path in paths) else 2 if paths else 5
+    symptoms = set(state.get('extracted_symptoms', []))
+    vitals = state.get('patient_input', {}).get('vitals', {})
+    red_vital = (vitals.get('spo2') is not None and vitals['spo2'] < 92) or (vitals.get('systolic_bp') is not None and vitals['systolic_bp'] < 90)
+    corroborated = red_vital or len(symptoms) >= 2
+    # A graph route is an alert, not a diagnosis. It must be corroborated by
+    # multiple observed signals before it can force the high-risk bucket.
+    level = 2 if paths and corroborated else 3 if paths else 5
     visited = [node for path in paths for node in path.split(' -> ')]
-    return {'worst_case_path': visited, 'adversary_level': level, 'reasoning_log': [{'agent_name': 'Safety Adversary', 'graph_nodes_visited': visited, 'conclusion': '; '.join(paths) if paths else 'No short path to critical endpoints.', 'confidence_delta': -.08 if paths else 0.0}]}
+    conclusion = '; '.join(paths) if paths else 'No short path to critical endpoints.'
+    if paths and not corroborated:
+        conclusion += ' Graph alert retained as Level 3 review because a second supporting signal is absent.'
+    return {'worst_case_path': visited, 'adversary_level': level, 'reasoning_log': [{'agent_name': 'Safety Adversary', 'graph_nodes_visited': visited, 'conclusion': conclusion, 'confidence_delta': -.08 if paths else 0.0}]}
 
 
 def _fallback_synthesis(state: TriageState) -> tuple[int, float, bool]:
@@ -226,7 +198,13 @@ def _fallback_synthesis(state: TriageState) -> tuple[int, float, bool]:
     if not state.get('extracted_symptoms'): confidence -= .12
     if state.get('degraded_mode'): confidence = min(confidence, .62)
     escalated = confidence < .70 or bool(state.get('worst_case_path'))
-    if confidence < .70: level = max(1, level - 1)
+    if confidence < .70:
+        level = max(1, level - 1)
+    quality = state.get('data_quality', {})
+    missing = set(quality.get('missing_fields', []))
+    observed_emergency = (patient['vitals'].get('spo2') is not None and patient['vitals']['spo2'] < 90) or (patient['vitals'].get('systolic_bp') is not None and patient['vitals']['systolic_bp'] < 90) or pain >= 9
+    if missing and not observed_emergency:
+        level = max(level, 3)
     return level, max(.3, min(.99, confidence)), escalated
 
 
@@ -234,34 +212,47 @@ async def _synthesizer_node(state: TriageState) -> dict[str, Any]:
     level, confidence, escalated = _fallback_synthesis(state)
     degraded = state.get('degraded_mode', False)
     complaint = state['patient_input']['chief_complaint'].lower()
-    use_model = _llm_enabled() and (state.get('confidence', 1) < .70 or len(state.get('worst_case_path', [])) > 4 or any(term in complaint for term in AMBIGUOUS_TERMS) or len(state.get('extracted_symptoms', [])) >= 3)
-    if use_model and not os.getenv('GOOGLE_API_KEY'):
-        degraded = True
-        level, confidence, escalated = _fallback_synthesis({**state, 'degraded_mode': True})
-    elif use_model and os.getenv('GOOGLE_API_KEY') and not degraded and _provider_available('google'):
+    use_model = _llm_enabled() and (confidence < .70 or bool(state.get('worst_case_path')) or any(term in complaint for term in AMBIGUOUS_TERMS) or len(state.get('extracted_symptoms', [])) >= 3)
+    gemini_summary = ''
+    local_safety_level = level
+    if use_model and llm_provider.gemini_configured() and not degraded and _provider_available('google'):
         try:
-            PROVIDER_CALL_COUNTS[llm_provider.provider()] = PROVIDER_CALL_COUNTS.get(llm_provider.provider(), 0) + 1
-            level, confidence, escalated = await llm_provider.synthesize(state)
-            level = min(level, state.get('demographic_level', 5), state.get('adversary_level', 5))
+            _record_provider_call('google')
+            suggested_level, suggested_confidence, suggested_escalated, gemini_summary = await llm_provider.synthesize(state, local_safety_level)
+            # Gemini may request greater urgency, but cannot downgrade below
+            # the deterministic safety floor.
+            level = min(suggested_level, local_safety_level)
+            confidence = min(confidence, suggested_confidence)
+            escalated = escalated or suggested_escalated
             if confidence < .70: level, escalated = max(1, level - 1), True
         except Exception as exc:
             degraded = True
             _block_provider('google')
             logger.warning('gemini_synthesis_failed', error=_error_summary(exc))
             level, confidence, escalated = _fallback_synthesis({**state, 'degraded_mode': True})
-    elif use_model and not degraded:
+    elif use_model:
         degraded = True
         level, confidence, escalated = _fallback_synthesis({**state, 'degraded_mode': True})
+    quality = state.get('data_quality', {})
+    missing = set(quality.get('missing_fields', []))
+    patient = state['patient_input']
+    pain = patient.get('self_reported_pain') or 0
+    observed_emergency = (patient['vitals'].get('spo2') is not None and patient['vitals']['spo2'] < 90) or (patient['vitals'].get('systolic_bp') is not None and patient['vitals']['systolic_bp'] < 90) or pain >= 9
+    if missing and not observed_emergency:
+        level = max(level, 3)
     flags = list(state.get('demographic_flags', []))
     if state.get('worst_case_path'): flags.append('Safety adversary found a short path to a critical condition')
     if degraded: flags.append('External AI unavailable: deterministic fail-safe active')
     critical = next((node for node in CRITICAL_NODES if node in state.get('worst_case_path', [])), None)
     evidence = flags or ['No demographic risk flags and no short path to a critical endpoint']
     if critical: evidence.append(f'Graph path reached {critical}')
+    if gemini_summary: evidence.append(f'Gemini reasoning: {gemini_summary}')
     explanation = {'summary': f'Level {level} because: {"; ".join(evidence)}.', 'evidence': evidence, 'why_this_level': f'ESI-style Level {level} preserves the most urgent observed safety signal.'}
     department = ROUTING.get(critical, 'General ED')
     routing_confidence = 'high' if level == 1 and critical else 'heuristic'
-    return {'triage_level': level, 'confidence': round(confidence, 2), 'degraded_mode': degraded, 'demographic_flags': flags, 'explanation': explanation, 'recommended_department': department, 'routing_confidence': routing_confidence, 'data_quality': state.get('data_quality', {'status': 'complete', 'missing_fields': [], 'invalid_fields': [], 'stale_fields': [], 'next_best_questions': []}), 'disclaimer': DISCLAIMER, 'reasoning_log': [{'agent_name': 'Synthesizer', 'graph_nodes_visited': [], 'conclusion': f'Safety-first ESI-style recommendation: Level {level}.', 'confidence_delta': 0.0}]}
+    conclusion = f'Safety-first ESI-style recommendation: Level {level}.'
+    if gemini_summary: conclusion += ' Gemini recommendation was constrained by the deterministic safety floor.'
+    return {'triage_level': level, 'confidence': round(confidence, 2), 'degraded_mode': degraded, 'demographic_flags': flags, 'explanation': explanation, 'recommended_department': department, 'routing_confidence': routing_confidence, 'data_quality': state.get('data_quality', {'status': 'complete', 'missing_fields': [], 'invalid_fields': [], 'stale_fields': [], 'next_best_questions': []}), 'disclaimer': DISCLAIMER, 'reasoning_log': [{'agent_name': 'Synthesizer', 'graph_nodes_visited': [], 'conclusion': conclusion, 'confidence_delta': 0.0}]}
 
 
 def _build_graph():

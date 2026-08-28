@@ -16,6 +16,9 @@ class Vitals(BaseModel):
 class PatientInput(BaseModel):
     patient_id: str = Field(min_length=2, max_length=64)
     patient_name: str = Field(default='', max_length=120)
+    gender: str = Field(default='Not specified', max_length=40)
+    pronouns: str = Field(default='', max_length=40)
+    preferred_language: str = Field(default='English', max_length=80)
     age_years: int = Field(ge=0, le=130)
     has_prior_history: bool
     chief_complaint: str = Field(min_length=3, max_length=1000)
@@ -51,7 +54,7 @@ class TriageResult(BaseModel):
     escalated_for_uncertainty: bool
     degraded_mode: bool
     reasoning_path: list[AgentReasoningPath]
-    trigger_reason: Literal['intake', 'wait_decay', 'vitals_change']
+    trigger_reason: Literal['intake', 'reassessment', 'vitals_change', 'clinician_override', 'manual_escalation']
     symptoms: list[str] = []
     demographic_flags: list[str] = []
     updated_at: datetime

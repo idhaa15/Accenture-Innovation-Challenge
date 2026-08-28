@@ -6,7 +6,7 @@
 [![Open Local Demo](https://img.shields.io/badge/Open-Local%20Demo-10b981?style=for-the-badge)](http://localhost:3000)
 [![API Health](https://img.shields.io/badge/API-FastAPI-0a7ea4?style=for-the-badge)](http://localhost:8000/health)
 
-Safety-first emergency-department triage prototype for the Accenture Innovation Challenge. PatientTriage.ai combines deterministic clinical rules, a NetworkX symptom graph, LangGraph orchestration, one configurable LLM provider, queue decay, clinician actions, and an audit trail.
+Safety-first emergency-department triage prototype for the Accenture Innovation Challenge. PatientTriage.ai combines deterministic safety policy, a NetworkX symptom graph, LangGraph orchestration, optional Groq extraction plus Gemini reasoning, clinician actions, and an audit trail.
 
 > Decision support only. Not a validated diagnostic device. Graph-based reasoning is a heuristic, not a licensed clinical protocol.
 
@@ -25,16 +25,16 @@ Safety-first emergency-department triage prototype for the Accenture Innovation 
 
 ## What We Built
 
-- Live ED queue with acuity and wait-time decay ranking.
+- Live ED queue with hard acuity buckets: a Level 1 can never be passed by a Level 2-5 patient because of wait time.
 - LangGraph workflow with four stages: Node Extraction, Demographic Specialist, Safety Adversary, and Synthesizer.
-- One configurable provider for optional extraction and synthesis (Groq by default; Google is available via configuration).
+- Optional two-stage model path: Groq extracts a closed symptom vocabulary; Gemini reasons over a redacted, structured ambiguous case.
 - PHI redaction before external calls and `LOCAL_ONLY_MODE` for zero external calls.
 - Deterministic fallback when providers time out, rate-limit, return invalid data, or are unavailable.
 - NetworkX symptom-to-risk graph that surfaces short paths to critical endpoints.
 - Pediatric, adult, and geriatric calibration rules.
-- Vitals-triggered re-triage.
+- Vitals-triggered re-triage and persisted reassessment schedules; overdue reassessments are visibly flagged without inventing new clinical observations.
 - Reversible surge simulation capped at 20 active patients.
-- Clinician override audit trail and synaptic graph-weight updates.
+- Clinician override and manual escalation audit trail; the clinician-set level becomes the active queue decision immediately.
 - SQLite WAL persistence.
 - Full fictional patient catalogue separated from the active hospital queue.
 
@@ -47,10 +47,10 @@ Frontend: Next.js + React + Cytoscape.js
 Backend: FastAPI
         v
 LangGraph workflow
-  |-- Node Extraction: local rules, optional configured provider
+  |-- Node Extraction: local rules, optional Groq extraction
   |-- Demographic Specialist: age-aware vital checks
   |-- Safety Adversary: NetworkX shortest paths
-  |-- Synthesizer: optional same provider, bounded fallback
+  |-- Synthesizer: optional Gemini reasoning, bounded by local safety rules
         |
         +--> SQLite audit store
         +--> NumPy queue decay
@@ -66,9 +66,9 @@ The complete fictional catalogue lives in `backend/app/mock_data/simulated_patie
 | Frontend | Next.js 14, React 18, TypeScript, Cytoscape.js, Lucide React |
 | API | FastAPI, Uvicorn, Pydantic v2 |
 | Orchestration | LangGraph, LangChain Core |
-| Optional models | Groq SDK, Google `google-genai` SDK |
+| Optional models | Groq extraction + Gemini reasoning via `google-genai` |
 | Reasoning graph | NetworkX |
-| Queue math | NumPy: `S_dynamic = S_base * exp(lambda * wait_seconds)` |
+| Queue policy | Hard acuity bucket → deterioration → reassessment due → capped linear wait fairness |
 | Storage | SQLite with WAL mode |
 | Logging | Structlog |
 
@@ -121,17 +121,16 @@ LLM mode is disabled by default. For fictional or approved de-identified demo da
 
 ```env
 TRIAGE_USE_LLM=true
-TRIAGE_LLM_PROVIDER=groq
 LOCAL_ONLY_MODE=false
 GROQ_API_KEY=your-key
 GOOGLE_API_KEY=your-key
 GROQ_MODEL=openai/gpt-oss-20b
 GEMINI_MODEL=gemini-3-flash-preview
 TRIAGE_MAX_CONCURRENT_CALLS=4
-TRIAGE_LLM_PATIENT_BUDGET=5
+TRIAGE_LLM_CALLS_PER_MINUTE=12
 ```
 
-The system uses local rules first. Providers are reserved for ambiguous cases, limited by concurrency and budget, de-identified before transmission, and protected by a circuit breaker. Provider failures return a valid deterministic result with `degraded_mode=true`. Set `LOCAL_ONLY_MODE=true` to guarantee no external calls.
+The system uses local rules first. Groq is reserved for closed-vocabulary symptom extraction and Gemini for ambiguous-case reasoning. Gemini receives the complete redacted structured case (complaint, vitals, pain, data quality, extracted symptoms, demographic flags, and graph evidence), but its recommendation cannot reduce urgency below the deterministic safety level. Providers are rate-limited in a rolling one-minute window, de-identified before transmission, and protected by a circuit breaker. Provider failures return a valid deterministic result with `degraded_mode=true`. Set `LOCAL_ONLY_MODE=true` to guarantee no external calls.
 
 Never commit `.env` or paste API keys into source control, screenshots, or chat.
 
@@ -139,9 +138,10 @@ Never commit `.env` or paste API keys into source control, screenshots, or chat.
 
 1. Open P001 to show an ambiguous low-pain presentation with a cardiac safety path.
 2. Enable the 3x surge to activate additional catalogue patients.
-3. Select a patient and use **Worsen vitals & re-triage**.
-4. Open **Clinician override**, provide a rationale, and submit it.
-5. Toggle **Fail-safe demo** to demonstrate deterministic operation when AI is unavailable.
+3. Select a patient, set a reassessment interval, and observe the due flag when its review is overdue.
+4. Use **Worsen vitals & re-triage** to show deterioration moving a patient within their acuity bucket.
+5. Open **Clinician override**, provide a rationale, and submit it; the active queue level changes immediately.
+6. Toggle **Fail-safe demo** to demonstrate deterministic operation when AI is unavailable.
 
 ## API Endpoints
 
@@ -155,13 +155,13 @@ Never commit `.env` or paste API keys into source control, screenshots, or chat.
 | `/patients/{patient_id}/vitals` | POST | Update vitals and reassess |
 | `/surge` | POST | Activate or reset a simulated surge |
 | `/demo/failsafe` | POST | Toggle deterministic demo mode |
-| `/override` | POST | Record clinician override and graph update |
-| `/encounters/{id}/accept` | POST | Accept the current recommendation |
+| `/override` | POST | Record clinician override, make it active, and record graph calibration |
+| `/encounters/{id}/accept` | POST | Move the patient from the waiting queue to treatment |
 | `/encounters/{id}/override` | POST | Audited rationale-required override |
-| `/encounters/{id}/escalate-now` | POST | Immediate Level 1 escalation |
+| `/encounters/{id}/escalate-now` | POST | Immediate active Level 1 escalation |
 | `/encounters/{id}/answer` | POST | Supply a missing vital and reassess |
 | `/encounters/{id}/second-opinion` | POST | Flag physician review |
-| `/encounters/{id}/reassessment-interval` | PATCH | Record a patient-specific interval |
+| `/encounters/{id}/reassessment-interval` | PATCH | Persist and schedule a patient-specific interval |
 | `/ws/queue` | WebSocket | Stream queue snapshots |
 
 ## Data and Information Safety
@@ -177,7 +177,18 @@ The project is optimized around a 20-patient active hospital simulation:
 - The catalogue is independent from active encounters.
 - Clear cases use deterministic local processing.
 - Ambiguous cases use LLMs selectively.
-- Queue refreshes and ranking make no external provider calls.
+- Queue refreshes make no external provider calls; they only mark overdue reassessment and apply the deterministic queue policy.
+
+## Queue Safety Policy
+
+The queue is sorted in this exact order:
+
+1. Triage level, where Level 1 is always ahead of Levels 2-5.
+2. Confirmed deterioration from a new vital-sign assessment.
+3. A reassessment that is due, which prompts staff to obtain new observations.
+4. Capped linear wait fairness within the same level only.
+
+Waiting time alone never promotes a patient into a more urgent clinical level. A clinician override or manual escalation writes a new active triage record and immediately reorders the queue. This prototype policy is for the fictional demo only and requires local clinical governance and validation before any deployment.
 - Provider concurrency defaults to four.
 - Provider budgets default to five calls per backend process.
 - Successful results are cached.

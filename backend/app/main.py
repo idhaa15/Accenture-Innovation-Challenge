@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.queue_decay import check_vitals_re_triage, within_bucket_priority
 from app.db import database
-from app.db.models import OverridePayload, PatientInput, SurgePayload, VitalsUpdate
+from app.db.models import OverridePayload, PatientInput, SurgePayload, VitalAnswer, Vitals, VitalsUpdate
 from app.graph.agents import PROVIDER_CALL_COUNTS, triage
 from app.graph.symptom_graph import build_symptom_graph, synaptic_update
 
@@ -35,14 +35,17 @@ def serialise_queue() -> list[dict]:
         row['reasoning_path'] = json.loads(row['reasoning_path'])
         row['explanation'] = json.loads(row.pop('explanation_json', '{}'))
         row['data_quality'] = json.loads(row.pop('data_quality_json', '{}'))
+        row['llm_response'] = json.loads(row.pop('llm_response_json', '{}'))
+        row['measurement_review_required'] = bool(row['data_quality'].get('measurement_review_required'))
         row['wait_seconds'] = int(wait); row['dynamic_score'] = round(float(score), 2)
         items.append(row)
     # Acuity is a hard boundary. The following safety signals order only within
-    # the same ESI-style level: detected deterioration, overdue reassessment,
-    # then capped waiting-time fairness.
+    # the same prototype urgency level: detected deterioration, required
+    # measurement review, overdue reassessment, then wait-time fairness.
     return sorted(items, key=lambda item: (
         item['triage_level'],
         not bool(item.get('deteriorating')),
+        not bool(item.get('measurement_review_required')),
         not bool(item.get('reassessment_due')),
         -item['dynamic_score'],
         -item['wait_seconds'],
@@ -122,6 +125,24 @@ async def update_vitals(patient_id: str, update: VitalsUpdate):
     fired = check_vitals_re_triage(current, prior, database.age_band(patient['age_years']))
     result = await assess(payload, 'vitals_change' if fired else 'reassessment')
     return {'reassessment_fired': fired, 'result': result}
+
+
+@app.post('/encounters/{patient_id}/update')
+async def update_encounter(patient_id: str, update: dict):
+    patient = database.get_patient(patient_id)
+    if not patient: raise HTTPException(404, 'Patient not found')
+    try:
+        vitals = Vitals.model_validate(update.get('vitals', json.loads(patient['vitals_json']))).model_dump()
+        complaint = str(update.get('chief_complaint', patient['chief_complaint'])).strip()
+        if len(complaint) < 3: raise ValueError('Chief complaint must be at least 3 characters')
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    payload = {key: patient.get(key, '') for key in ('patient_id', 'patient_name', 'gender', 'pronouns', 'preferred_language', 'age_years', 'has_prior_history', 'self_reported_pain')}
+    payload.update({'chief_complaint': complaint, 'vitals': vitals})
+    result = await assess(payload, 'reassessment')
+    changed_vitals = [field for field, value in vitals.items() if value != json.loads(patient['vitals_json']).get(field)]
+    database.record_action(patient_id, 'clinician', 'patient-update', {'updated_fields': (['chief_complaint'] if complaint != patient['chief_complaint'] else []) + changed_vitals, 'trigger': 'reassessment'})
+    return {'result': result, 'queue_updated': True}
 
 
 @app.post('/surge')
@@ -224,15 +245,15 @@ def escalate_now(patient_id: str, actor: str = 'clinician'):
 
 
 @app.post('/encounters/{patient_id}/answer')
-async def answer(patient_id: str, answer: dict):
+async def answer(patient_id: str, answer: VitalAnswer):
     patient = database.get_patient(patient_id)
     if not patient: raise HTTPException(404, 'Patient not found')
-    vitals = json.loads(patient['vitals_json']); field, value = answer.get('field'), answer.get('value')
-    if field not in {'heart_rate', 'resp_rate', 'spo2', 'temp_c', 'systolic_bp'}: raise HTTPException(400, 'Only vital fields can be answered')
-    vitals[field] = value
-    payload = {key: patient[key] for key in ('patient_id', 'age_years', 'has_prior_history', 'chief_complaint')}; payload['vitals'] = vitals
+    vitals = json.loads(patient['vitals_json'])
+    vitals[answer.field] = answer.value
+    vitals = Vitals.model_validate(vitals).model_dump()
+    payload = {key: patient[key] for key in ('patient_id', 'patient_name', 'gender', 'pronouns', 'preferred_language', 'age_years', 'has_prior_history', 'chief_complaint', 'self_reported_pain')}; payload['vitals'] = vitals
     result = await assess(payload, 'reassessment')
-    database.record_action(patient_id, answer.get('actor', 'clinician'), 'answer', {'field': field})
+    database.record_action(patient_id, answer.actor, 'answer', {'field': answer.field})
     return result
 
 

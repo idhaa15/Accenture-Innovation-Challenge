@@ -33,13 +33,13 @@ async def extract(patient: dict, labels: list[str]) -> list[str]:
     return [item for item in symptoms if isinstance(item, str) and item in labels]
 
 
-async def synthesize(state: dict[str, Any], local_safety_level: int) -> tuple[int, float, bool, str]:
-    """Gemini may recommend a more urgent level; deterministic policy remains the floor."""
+async def synthesize(state: dict[str, Any], local_safety_level: int, allowed_symptoms: list[str]) -> dict[str, Any]:
+    """Primary LLM path: extract closed-vocabulary symptoms and reason in one response."""
     if not gemini_configured():
         raise RuntimeError('Gemini reasoning is not configured')
     safe_patient = redact_patient(state['patient_input'])
     prompt = {
-        'instruction': 'Return JSON only with triage_level (1-5), confidence (0-1), escalated (boolean), reasoning_summary (string). Level 1 is most urgent. This is a decision-support recommendation, not a diagnosis. Do not reduce urgency below local_safety_level.',
+        'instruction': f'Return JSON only with triage_level (1-5), confidence (0-1), escalated (boolean), symptoms (array using only {allowed_symptoms}), and reasoning_summary (a concise, human-readable explanation citing observed facts, uncertainty, and next action). Level 1 is most urgent. This is decision support, not a diagnosis. Make the urgency recommendation from observed evidence. Missing fields are unknown: never treat them as normal or abnormal, never change triage_level because a field is missing alone, and state that critical missing observations require measurement review. Do not reduce urgency below local_safety_level.',
         'local_safety_level': local_safety_level,
         'patient': safe_patient,
         'extracted_symptoms': state.get('extracted_symptoms', []),
@@ -55,4 +55,5 @@ async def synthesize(state: dict[str, Any], local_safety_level: int) -> tuple[in
     level, confidence = int(value['triage_level']), float(value['confidence'])
     if level not in range(1, 6) or not 0 <= confidence <= 1:
         raise ValueError('Provider response outside supported range')
-    return level, confidence, bool(value.get('escalated', confidence < .7)), str(value.get('reasoning_summary', '')).strip()
+    symptoms = [item for item in value.get('symptoms', []) if isinstance(item, str) and item in allowed_symptoms]
+    return {**value, 'triage_level': level, 'confidence': confidence, 'escalated': bool(value.get('escalated', confidence < .7)), 'symptoms': list(dict.fromkeys(symptoms)), 'reasoning_summary': str(value.get('reasoning_summary', '')).strip()}

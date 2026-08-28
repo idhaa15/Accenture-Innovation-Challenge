@@ -1,0 +1,5 @@
+.queue-policy { display: none; }
+.update-patient { border: 1px solid #d7ddda; background: #fff; color: #315f53; padding: 7px 10px; font-weight: 600; }
+.landing { display: grid; min-height: 100vh; place-items: center; }
+.landing .welcome { margin: 0; border: 1px solid #d7ddda; background: #fff; }
+.landing-secondary { display: block; margin-top: 10px; border: 0; background: none; color: #315f53; padding: 6px 0; }

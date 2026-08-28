@@ -40,11 +40,13 @@ class Explanation(BaseModel):
 
 
 class DataQuality(BaseModel):
-    status: Literal['complete', 'incomplete']
+    status: Literal['complete', 'incomplete', 'critical_fields_missing']
     missing_fields: list[str] = []
     invalid_fields: list[str] = []
     stale_fields: list[str] = []
     next_best_questions: list[str] = []
+    measurement_review_required: bool = False
+    review_reason: str = ''
 
 
 class TriageResult(BaseModel):
@@ -82,6 +84,12 @@ class OverridePayload(BaseModel):
 
 class VitalsUpdate(BaseModel):
     vitals: Vitals
+
+
+class VitalAnswer(BaseModel):
+    field: Literal['heart_rate', 'resp_rate', 'spo2', 'temp_c', 'systolic_bp']
+    value: float
+    actor: str = Field(default='clinician', min_length=2, max_length=100)
 
 
 class SurgePayload(BaseModel):

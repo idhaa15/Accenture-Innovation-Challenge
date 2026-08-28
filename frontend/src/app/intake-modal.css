@@ -1,0 +1,12 @@
+.modal.intake-modal {
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+@media (max-width: 800px) {
+  .modal.intake-modal {
+    max-height: calc(100dvh - 20px);
+  }
+}

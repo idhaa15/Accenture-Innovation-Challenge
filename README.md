@@ -4,9 +4,9 @@
 [![Open Local Demo](https://img.shields.io/badge/Open-Local%20Demo-10b981?style=for-the-badge)](http://localhost:3000)
 [![API Health](https://img.shields.io/badge/API-FastAPI-0a7ea4?style=for-the-badge)](http://localhost:8000/health)
 
-Safety-first emergency-department triage prototype for the Accenture Innovation Challenge. PatientTriage.ai combines deterministic clinical rules, a NetworkX symptom graph, LangGraph orchestration, optional Groq and Google Gemini calls, queue decay, clinician overrides, and an audit trail.
+Safety-first emergency-department triage prototype for the Accenture Innovation Challenge. PatientTriage.ai combines deterministic clinical rules, a NetworkX symptom graph, LangGraph orchestration, one configurable LLM provider, queue decay, clinician actions, and an audit trail.
 
-> Fictional clinical decision-support demo only. It is not a diagnostic device, medical advice system, or validated clinical protocol.
+> Decision support only. Not a validated diagnostic device. Graph-based reasoning is a heuristic, not a licensed clinical protocol.
 
 ## Table of Contents
 
@@ -25,7 +25,8 @@ Safety-first emergency-department triage prototype for the Accenture Innovation 
 
 - Live ED queue with acuity and wait-time decay ranking.
 - LangGraph workflow with four stages: Node Extraction, Demographic Specialist, Safety Adversary, and Synthesizer.
-- Optional Groq symptom extraction and Google Gemini synthesis.
+- One configurable provider for optional extraction and synthesis (Groq by default; Google is available via configuration).
+- PHI redaction before external calls and `LOCAL_ONLY_MODE` for zero external calls.
 - Deterministic fallback when providers time out, rate-limit, return invalid data, or are unavailable.
 - NetworkX symptom-to-risk graph that surfaces short paths to critical endpoints.
 - Pediatric, adult, and geriatric calibration rules.
@@ -44,10 +45,10 @@ Frontend: Next.js + React + Cytoscape.js
 Backend: FastAPI
         v
 LangGraph workflow
-  |-- Node Extraction: local rules, optional Groq
+  |-- Node Extraction: local rules, optional configured provider
   |-- Demographic Specialist: age-aware vital checks
   |-- Safety Adversary: NetworkX shortest paths
-  |-- Synthesizer: optional Gemini, bounded fallback
+  |-- Synthesizer: optional same provider, bounded fallback
         |
         +--> SQLite audit store
         +--> NumPy queue decay
@@ -99,7 +100,7 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8003
 ```
 
 ### Frontend
@@ -110,7 +111,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000. The API is available at http://localhost:8000 and health checks are available at http://localhost:8000/health.
+Open http://localhost:3000. The API is available at http://localhost:8003 and health checks are available at http://localhost:8003/health.
 
 ## Optional LLM Mode
 
@@ -118,6 +119,8 @@ LLM mode is disabled by default. For fictional or approved de-identified demo da
 
 ```env
 TRIAGE_USE_LLM=true
+TRIAGE_LLM_PROVIDER=groq
+LOCAL_ONLY_MODE=false
 GROQ_API_KEY=your-key
 GOOGLE_API_KEY=your-key
 GROQ_MODEL=openai/gpt-oss-20b
@@ -126,7 +129,7 @@ TRIAGE_MAX_CONCURRENT_CALLS=4
 TRIAGE_LLM_PATIENT_BUDGET=5
 ```
 
-The system uses local rules first. Providers are reserved for ambiguous cases, limited by concurrency and budget, cached where possible, and protected by a circuit breaker. Provider failures return a valid deterministic result with `degraded_mode=true`.
+The system uses local rules first. Providers are reserved for ambiguous cases, limited by concurrency and budget, de-identified before transmission, and protected by a circuit breaker. Provider failures return a valid deterministic result with `degraded_mode=true`. Set `LOCAL_ONLY_MODE=true` to guarantee no external calls.
 
 Never commit `.env` or paste API keys into source control, screenshots, or chat.
 
@@ -143,6 +146,7 @@ Never commit `.env` or paste API keys into source control, screenshots, or chat.
 | Endpoint | Method | Purpose |
 |---|---:|---|
 | `/health` | GET | Service health and fail-safe state |
+| `/status` | GET | Queue depth, fallback rate, and provider telemetry |
 | `/queue` | GET | Active ranked queue |
 | `/graph` | GET | Cytoscape graph data |
 | `/triage/intake` | POST | Assess a patient |
@@ -150,11 +154,17 @@ Never commit `.env` or paste API keys into source control, screenshots, or chat.
 | `/surge` | POST | Activate or reset a simulated surge |
 | `/demo/failsafe` | POST | Toggle deterministic demo mode |
 | `/override` | POST | Record clinician override and graph update |
+| `/encounters/{id}/accept` | POST | Accept the current recommendation |
+| `/encounters/{id}/override` | POST | Audited rationale-required override |
+| `/encounters/{id}/escalate-now` | POST | Immediate Level 1 escalation |
+| `/encounters/{id}/answer` | POST | Supply a missing vital and reassess |
+| `/encounters/{id}/second-opinion` | POST | Flag physician review |
+| `/encounters/{id}/reassessment-interval` | PATCH | Record a patient-specific interval |
 | `/ws/queue` | WebSocket | Stream queue snapshots |
 
 ## Data and Information Safety
 
-The repository contains fictional data only. With LLM mode enabled, selected complaint text and vitals are sent to configured external providers, so this configuration is not automatically suitable for real patient information.
+The repository contains fictional data only. With LLM mode enabled, selected de-identified complaint text and vitals are sent to the configured external provider. This configuration is not suitable for real patient information. Use `LOCAL_ONLY_MODE=true` for privacy-sensitive demos.
 
 Before real hospital use, the project would require private or approved provider endpoints, encryption, authentication, role-based access, secrets management, audit controls, data retention policies, security testing, clinical validation, and hospital privacy approval.
 

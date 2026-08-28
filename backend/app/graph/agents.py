@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 
 from app.db.database import age_band
+from app.graph import llm_provider
 from app.graph.symptom_graph import CRITICAL_NODES
 
 load_dotenv()
@@ -37,6 +38,8 @@ PROVIDER_SEMAPHORE = asyncio.Semaphore(PROVIDER_CONCURRENCY)
 TRIAGE_CACHE: dict[str, dict[str, Any]] = {}
 PROVIDER_BLOCKED_UNTIL = {'groq': 0.0, 'google': 0.0}
 PROVIDER_CALL_COUNTS = {'groq': 0, 'google': 0}
+ROUTING = {'myocardial_infarction': 'Cardiology', 'stroke': 'Neurology', 'sepsis': 'Internal Medicine / ICU', 'respiratory_failure': 'Pulmonology', 'internal_bleeding': 'General Surgery'}
+DISCLAIMER = 'Decision support only. Not a validated diagnostic device. Graph-based reasoning is a heuristic, not a licensed clinical protocol.'
 
 
 def _provider_available(name: str) -> bool:
@@ -65,6 +68,11 @@ class TriageState(TypedDict, total=False):
     degraded_mode: bool
     reasoning_log: Annotated[list[dict[str, Any]], add]
     trigger_reason: str
+    data_quality: dict[str, Any]
+    explanation: dict[str, Any]
+    recommended_department: str
+    routing_confidence: str
+    disclaimer: str
 
 
 def extract_symptoms(patient: dict[str, Any]) -> list[str]:
@@ -78,7 +86,7 @@ def extract_symptoms(patient: dict[str, Any]) -> list[str]:
 
 
 def _llm_enabled() -> bool:
-    return os.getenv('TRIAGE_USE_LLM', 'false').lower() in {'1', 'true', 'yes', 'on'}
+    return llm_provider.enabled()
 
 
 def _parse_json(content: str) -> dict[str, Any]:
@@ -144,7 +152,8 @@ async def _extract_node(state: TriageState) -> dict[str, Any]:
         degraded = True
     elif use_model and os.getenv('GROQ_API_KEY') and _provider_available('groq'):
         try:
-            symptoms = list(dict.fromkeys(await _groq_extract(patient))) or symptoms
+            PROVIDER_CALL_COUNTS[llm_provider.provider()] = PROVIDER_CALL_COUNTS.get(llm_provider.provider(), 0) + 1
+            symptoms = list(dict.fromkeys(await llm_provider.extract(patient, sorted(GRAPH_LABELS)))) or symptoms
         except Exception as exc:
             degraded = True
             _block_provider('groq')
@@ -164,9 +173,14 @@ async def _demographic_node(state: TriageState) -> dict[str, Any]:
     band, flags, urgency, confidence = age_band(age), [], 5, .86
     if not patient['has_prior_history']:
         flags.append('No prior history available: uncertainty elevated'); confidence -= .13
-    missing = [key for key, value in vitals.items() if value is None]
+    expected = ('heart_rate', 'resp_rate', 'spo2', 'temp_c', 'systolic_bp')
+    missing = [key for key in expected if vitals.get(key) is None]
+    questions = {'spo2': 'Measure oxygen saturation', 'systolic_bp': 'Measure blood pressure', 'heart_rate': 'Measure heart rate', 'resp_rate': 'Measure respiratory rate', 'temp_c': 'Measure temperature'}
     if missing:
         flags.append(f'Missing intake vital(s): {", ".join(missing)}'); confidence -= .18; urgency = min(urgency, 3)
+    high_risk_missing = [key for key in ('spo2', 'systolic_bp') if key in missing]
+    if high_risk_missing:
+        confidence -= .12; urgency = min(urgency, 2)
     hr, rr, temp, spo2, bp = (vitals.get(key) for key in ('heart_rate', 'resp_rate', 'temp_c', 'spo2', 'systolic_bp'))
     if band == 'pediatric':
         if hr and hr > 160: flags.append('Pediatric tachycardia'); urgency = min(urgency, 2)
@@ -182,7 +196,8 @@ async def _demographic_node(state: TriageState) -> dict[str, Any]:
         if spo2 and spo2 < 94: flags.append('Low oxygen saturation'); urgency = min(urgency, 1)
     if hr and hr > 130: flags.append('Severe tachycardia'); urgency = min(urgency, 2)
     if bp and bp < 90: flags.append('Hypotension'); urgency = min(urgency, 1)
-    return {'demographic_flags': flags, 'demographic_level': urgency, 'base_confidence': max(.35, confidence), 'reasoning_log': [{'agent_name': 'Demographic Specialist', 'graph_nodes_visited': [], 'conclusion': '; '.join(flags) or 'No demographic risk flags.', 'confidence_delta': round(confidence - .86, 2)}]}
+    quality = {'status': 'incomplete' if missing else 'complete', 'missing_fields': missing, 'invalid_fields': [], 'stale_fields': [], 'next_best_questions': [questions[key] for key in missing]}
+    return {'demographic_flags': flags, 'demographic_level': urgency, 'base_confidence': max(.3, confidence), 'data_quality': quality, 'reasoning_log': [{'agent_name': 'Demographic Specialist', 'graph_nodes_visited': [], 'conclusion': '; '.join(flags) or 'No demographic risk flags.', 'confidence_delta': round(confidence - .86, 2)}]}
 
 
 async def _adversary_node(state: TriageState) -> dict[str, Any]:
@@ -225,7 +240,8 @@ async def _synthesizer_node(state: TriageState) -> dict[str, Any]:
         level, confidence, escalated = _fallback_synthesis({**state, 'degraded_mode': True})
     elif use_model and os.getenv('GOOGLE_API_KEY') and not degraded and _provider_available('google'):
         try:
-            level, confidence, escalated = await _gemini_synthesize(state)
+            PROVIDER_CALL_COUNTS[llm_provider.provider()] = PROVIDER_CALL_COUNTS.get(llm_provider.provider(), 0) + 1
+            level, confidence, escalated = await llm_provider.synthesize(state)
             level = min(level, state.get('demographic_level', 5), state.get('adversary_level', 5))
             if confidence < .70: level, escalated = max(1, level - 1), True
         except Exception as exc:
@@ -239,7 +255,13 @@ async def _synthesizer_node(state: TriageState) -> dict[str, Any]:
     flags = list(state.get('demographic_flags', []))
     if state.get('worst_case_path'): flags.append('Safety adversary found a short path to a critical condition')
     if degraded: flags.append('External AI unavailable: deterministic fail-safe active')
-    return {'triage_level': level, 'confidence': round(confidence, 2), 'degraded_mode': degraded, 'demographic_flags': flags, 'reasoning_log': [{'agent_name': 'Synthesizer', 'graph_nodes_visited': [], 'conclusion': f'Safety-first ESI-style recommendation: Level {level}.', 'confidence_delta': 0.0}]}
+    critical = next((node for node in CRITICAL_NODES if node in state.get('worst_case_path', [])), None)
+    evidence = flags or ['No demographic risk flags and no short path to a critical endpoint']
+    if critical: evidence.append(f'Graph path reached {critical}')
+    explanation = {'summary': f'Level {level} because: {"; ".join(evidence)}.', 'evidence': evidence, 'why_this_level': f'ESI-style Level {level} preserves the most urgent observed safety signal.'}
+    department = ROUTING.get(critical, 'General ED')
+    routing_confidence = 'high' if level == 1 and critical else 'heuristic'
+    return {'triage_level': level, 'confidence': round(confidence, 2), 'degraded_mode': degraded, 'demographic_flags': flags, 'explanation': explanation, 'recommended_department': department, 'routing_confidence': routing_confidence, 'data_quality': state.get('data_quality', {'status': 'complete', 'missing_fields': [], 'invalid_fields': [], 'stale_fields': [], 'next_best_questions': []}), 'disclaimer': DISCLAIMER, 'reasoning_log': [{'agent_name': 'Synthesizer', 'graph_nodes_visited': [], 'conclusion': f'Safety-first ESI-style recommendation: Level {level}.', 'confidence_delta': 0.0}]}
 
 
 def _build_graph():
@@ -275,7 +297,7 @@ async def triage(patient: dict[str, Any], graph: nx.Graph, degraded_mode: bool =
     if cached and trigger_reason == 'intake':
         return copy.deepcopy(cached)
     state = await TRIAGE_GRAPH.ainvoke({'patient_input': patient, 'graph': graph, 'degraded_mode': degraded_mode, 'trigger_reason': trigger_reason})
-    result = {'patient_id': patient['patient_id'], 'triage_level': state['triage_level'], 'confidence': state['confidence'], 'escalated_for_uncertainty': state['triage_level'] <= 2 or bool(state.get('worst_case_path')) or state.get('confidence', 1) < .70, 'degraded_mode': state.get('degraded_mode', False), 'reasoning_path': state['reasoning_log'], 'trigger_reason': trigger_reason, 'symptoms': state.get('extracted_symptoms', []), 'demographic_flags': state.get('demographic_flags', []), 'updated_at': datetime.now(timezone.utc).isoformat()}
+    result = {'patient_id': patient['patient_id'], 'triage_level': state['triage_level'], 'confidence': state['confidence'], 'escalated_for_uncertainty': state['triage_level'] <= 2 or bool(state.get('worst_case_path')) or state.get('confidence', 1) < .70, 'degraded_mode': state.get('degraded_mode', False), 'reasoning_path': state['reasoning_log'], 'trigger_reason': trigger_reason, 'symptoms': state.get('extracted_symptoms', []), 'demographic_flags': state.get('demographic_flags', []), 'explanation': state.get('explanation', {}), 'recommended_department': state.get('recommended_department', 'General ED'), 'routing_confidence': state.get('routing_confidence', 'heuristic'), 'data_quality': state.get('data_quality', {'status': 'complete', 'missing_fields': [], 'invalid_fields': [], 'stale_fields': [], 'next_best_questions': []}), 'disclaimer': state.get('disclaimer', DISCLAIMER), 'updated_at': datetime.now(timezone.utc).isoformat()}
     if trigger_reason == 'intake' and not result['degraded_mode']:
         TRIAGE_CACHE[cache_key] = copy.deepcopy(result)
     return result

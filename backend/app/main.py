@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.queue_decay import check_vitals_re_triage, recompute_queue
 from app.db import database
 from app.db.models import OverridePayload, PatientInput, SurgePayload, VitalsUpdate
-from app.graph.agents import triage
+from app.graph.agents import PROVIDER_CALL_COUNTS, triage
 from app.graph.symptom_graph import build_symptom_graph, synaptic_update
 
 GRAPH = build_symptom_graph()
@@ -32,6 +32,8 @@ def serialise_queue() -> list[dict]:
     for row, score, wait in zip(rows, dynamic, waits):
         row['vitals'] = json.loads(row.pop('vitals_json'))
         row['reasoning_path'] = json.loads(row['reasoning_path'])
+        row['explanation'] = json.loads(row.pop('explanation_json', '{}'))
+        row['data_quality'] = json.loads(row.pop('data_quality_json', '{}'))
         row['wait_seconds'] = int(wait); row['dynamic_score'] = round(float(score), 2)
         items.append(row)
     return sorted(items, key=lambda item: item['dynamic_score'], reverse=True)
@@ -53,9 +55,19 @@ async def assess_many(records: list[dict], trigger: str = 'intake') -> list[dict
     return await asyncio.gather(*(bounded(record) for record in records))
 
 
+def restore_graph_weights() -> int:
+    updates = database.weight_history()
+    for update in updates:
+        if GRAPH.has_edge(update['source_node'], update['target_node']):
+            GRAPH[update['source_node']][update['target_node']]['weight'] = update['new_weight']
+    return len(updates)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.initialise()
+    restored = restore_graph_weights()
+    print(f'Restored {restored} historical graph weight update(s).')
     if not database.queue_rows():
         records = json.loads((Path(__file__).parent / 'mock_data' / 'simulated_patients.json').read_text())
         await assess_many(records[:5])
@@ -72,6 +84,12 @@ def health(): return {'status': 'ok', 'failsafe_mode': FAILSAFE_MODE}
 
 @app.get('/queue')
 def queue(): return {'patients': serialise_queue(), 'failsafe_mode': FAILSAFE_MODE, 'surge_mode': SURGE_ACTIVE}
+
+
+@app.get('/status')
+def status():
+    stats = database.recent_action_stats()
+    return {'queue_depth': len(database.queue_rows()), 'fallback_rate_5m': stats['fallbacks'] / max(1, stats['actions']), 'provider_calls': PROVIDER_CALL_COUNTS}
 
 
 @app.post('/triage/intake')
@@ -134,15 +152,64 @@ def graph():
 def override(payload: OverridePayload):
     latest = database.latest_triage(payload.patient_id)
     if not latest: raise HTTPException(404, 'No assessment found for this patient')
-    override_id = database.record_override(payload.patient_id, payload.clinician_id, latest['triage_level'], latest['confidence'], payload.overridden_level, payload.justification, payload.jurisdiction)
     delta = 1 if payload.overridden_level < latest['triage_level'] else -1 if payload.overridden_level > latest['triage_level'] else 0
     paths = json.loads(latest['reasoning_path'])
     nodes = next((r['graph_nodes_visited'] for r in paths if r['agent_name'] == 'Safety Adversary'), [])
     updates = []
     for source, target in zip(nodes, nodes[1:]):
         old, new = synaptic_update(GRAPH, source, target, delta)
-        if old != new: database.record_weight(source, target, old, new, override_id); updates.append({'source': source, 'target': target, 'old_weight': old, 'new_weight': new})
+        if old != new: updates.append({'source': source, 'target': target, 'old_weight': old, 'new_weight': new})
+    override_id = database.record_override_with_weights(payload.patient_id, payload.clinician_id, latest['triage_level'], latest['confidence'], payload.overridden_level, payload.justification, payload.jurisdiction, [(item['source'], item['target'], item['old_weight'], item['new_weight']) for item in updates])
     return {'override_id': override_id, 'audit_logged': True, 'weight_updates': updates}
+
+
+@app.post('/encounters/{patient_id}/accept')
+def accept(patient_id: str, actor: str = 'clinician'):
+    if not database.latest_triage(patient_id): raise HTTPException(404, 'No assessment found for this patient')
+    return {'action_id': database.record_action(patient_id, actor, 'accept', {'status': 'accepted'}), 'audit_logged': True}
+
+
+@app.post('/encounters/{patient_id}/override')
+def encounter_override(patient_id: str, payload: OverridePayload):
+    if payload.patient_id != patient_id: raise HTTPException(400, 'Patient identifier mismatch')
+    result = override(payload)
+    database.record_action(patient_id, payload.clinician_id, 'override', {'override_id': result['override_id'], 'justification': payload.justification})
+    return result
+
+
+@app.post('/encounters/{patient_id}/escalate-now')
+def escalate_now(patient_id: str, actor: str = 'clinician'):
+    latest = database.latest_triage(patient_id)
+    if not latest: raise HTTPException(404, 'No assessment found for this patient')
+    action_id = database.record_action(patient_id, actor, 'escalate-now', {'level': 1, 'reason': 'manual escalation'})
+    return {'action_id': action_id, 'triage_level': 1, 'audit_logged': True}
+
+
+@app.post('/encounters/{patient_id}/answer')
+async def answer(patient_id: str, answer: dict):
+    patient = database.get_patient(patient_id)
+    if not patient: raise HTTPException(404, 'Patient not found')
+    vitals = json.loads(patient['vitals_json']); field, value = answer.get('field'), answer.get('value')
+    if field not in {'heart_rate', 'resp_rate', 'spo2', 'temp_c', 'systolic_bp'}: raise HTTPException(400, 'Only vital fields can be answered')
+    vitals[field] = value
+    payload = {key: patient[key] for key in ('patient_id', 'age_years', 'has_prior_history', 'chief_complaint')}; payload['vitals'] = vitals
+    result = await assess(payload, 'vitals_change')
+    database.record_action(patient_id, answer.get('actor', 'clinician'), 'answer', {'field': field})
+    return result
+
+
+@app.post('/encounters/{patient_id}/second-opinion')
+def second_opinion(patient_id: str, actor: str = 'clinician'):
+    if not database.get_patient(patient_id): raise HTTPException(404, 'Patient not found')
+    return {'action_id': database.record_action(patient_id, actor, 'second-opinion', {'review_requested': True}), 'audit_logged': True}
+
+
+@app.patch('/encounters/{patient_id}/reassessment-interval')
+def reassessment_interval(patient_id: str, payload: dict):
+    if not database.get_patient(patient_id): raise HTTPException(404, 'Patient not found')
+    seconds = payload.get('seconds')
+    if not isinstance(seconds, int) or seconds < 10 or seconds > 3600: raise HTTPException(400, 'seconds must be between 10 and 3600')
+    return {'action_id': database.record_action(patient_id, payload.get('actor', 'clinician'), 'reassessment-interval', {'seconds': seconds}), 'audit_logged': True}
 
 
 @app.websocket('/ws/queue')

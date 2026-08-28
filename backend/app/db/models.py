@@ -15,6 +15,7 @@ class Vitals(BaseModel):
 
 class PatientInput(BaseModel):
     patient_id: str = Field(min_length=2, max_length=64)
+    patient_name: str = Field(default='', max_length=120)
     age_years: int = Field(ge=0, le=130)
     has_prior_history: bool
     chief_complaint: str = Field(min_length=3, max_length=1000)
@@ -29,6 +30,20 @@ class AgentReasoningPath(BaseModel):
     confidence_delta: float
 
 
+class Explanation(BaseModel):
+    summary: str = Field(min_length=1)
+    evidence: list[str]
+    why_this_level: str = Field(min_length=1)
+
+
+class DataQuality(BaseModel):
+    status: Literal['complete', 'incomplete']
+    missing_fields: list[str] = []
+    invalid_fields: list[str] = []
+    stale_fields: list[str] = []
+    next_best_questions: list[str] = []
+
+
 class TriageResult(BaseModel):
     patient_id: str
     triage_level: int = Field(ge=1, le=5)
@@ -40,6 +55,11 @@ class TriageResult(BaseModel):
     symptoms: list[str] = []
     demographic_flags: list[str] = []
     updated_at: datetime
+    explanation: Explanation
+    recommended_department: str
+    routing_confidence: Literal['high', 'heuristic']
+    data_quality: DataQuality
+    disclaimer: str = Field(min_length=1)
 
 
 class OverridePayload(BaseModel):

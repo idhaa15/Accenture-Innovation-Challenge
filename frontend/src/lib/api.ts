@@ -1,5 +1,7 @@
-export const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-export type Patient = { patient_id:string; age_years:number; age_band:string; chief_complaint:string; vitals: Record<string, number | null>; triage_level:number; confidence:number; escalated_for_uncertainty:boolean; degraded_mode:boolean; dynamic_score:number; wait_seconds:number; reasoning_path: Reasoning[]; demographic_flags?:string[] };
+export const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8003';
+export type Explanation = { summary:string; evidence:string[]; why_this_level:string };
+export type DataQuality = { status:'complete'|'incomplete'; missing_fields:string[]; invalid_fields:string[]; stale_fields:string[]; next_best_questions:string[] };
+export type Patient = { patient_id:string; age_years:number; age_band:string; chief_complaint:string; vitals: Record<string, number | null>; triage_level:number; confidence:number; escalated_for_uncertainty:boolean; degraded_mode:boolean; dynamic_score:number; wait_seconds:number; reasoning_path: Reasoning[]; demographic_flags?:string[]; explanation:Explanation; recommended_department:string; routing_confidence:'high'|'heuristic'; data_quality:DataQuality; disclaimer:string };
 export type Reasoning = { agent_name:string; graph_nodes_visited:string[]; conclusion:string; confidence_delta:number };
 export async function getQueue() { const r = await fetch(`${API}/queue`, { cache:'no-store' }); if (!r.ok) throw new Error('API unavailable'); return r.json() as Promise<{patients:Patient[];failsafe_mode:boolean;surge_mode:boolean}>; }
 export async function post(path:string, body?:unknown) { const r=await fetch(`${API}${path}`, {method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}); if(!r.ok) throw new Error(await r.text()); return r.json(); }

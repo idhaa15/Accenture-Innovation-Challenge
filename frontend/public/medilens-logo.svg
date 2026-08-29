@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#2f6556" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-labelledby="title">
+  <title id="title">MediLens</title>
+  <path d="M21.2 12c.55 0 1.005-.449.95-.998a10 10 0 0 0-18.9 0A1 1 0 0 0 4 12h3l2-3 2 6 2-3h7.2Z"/>
+  <path d="M12 21a10 10 0 0 0 9.7-7.6"/>
+  <path d="M12 21a10 10 0 0 1-9.7-7.6"/>
+</svg>

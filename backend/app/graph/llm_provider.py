@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from typing import Any
 
 from app.core.redact import redact_patient
@@ -18,6 +19,19 @@ def groq_configured() -> bool:
 
 def gemini_configured() -> bool:
     return enabled() and bool(os.getenv('GOOGLE_API_KEY'))
+
+
+def _parse_gemini_json(text: str | None) -> dict[str, Any]:
+    """Accept JSON mode output and safely tolerate a legacy Markdown fence."""
+    content = (text or '').strip()
+    content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content, flags=re.IGNORECASE).strip()
+    start = content.find('{')
+    if start < 0:
+        raise ValueError('Gemini returned no JSON object')
+    value, _ = json.JSONDecoder().raw_decode(content[start:])
+    if not isinstance(value, dict):
+        raise ValueError('Gemini response was not a JSON object')
+    return value
 
 
 async def extract(patient: dict, labels: list[str]) -> list[str]:
@@ -49,9 +63,29 @@ async def synthesize(state: dict[str, Any], local_safety_level: int, allowed_sym
         'base_confidence': state.get('base_confidence', .35),
     }
     from google import genai
+    from google.genai import types
     client = genai.Client(api_key=os.environ['GOOGLE_API_KEY'])
-    response = await asyncio.wait_for(client.aio.models.generate_content(model=os.getenv('GEMINI_MODEL', 'gemini-3-flash-preview'), contents=json.dumps(prompt)), timeout=float(os.getenv('TRIAGE_LLM_TIMEOUT_SECONDS', '10')))
-    value = json.loads(response.text or '{}')
+    # Gemini can take longer than ten seconds for structured clinical reasoning.
+    # A short deadline caused healthy calls to be marked unavailable and opened
+    # the fail-safe circuit breaker unnecessarily.
+    request = {
+        'model': os.getenv('GEMINI_MODEL', 'gemini-3-flash-preview'),
+        'contents': json.dumps(prompt),
+        'config': types.GenerateContentConfig(response_mime_type='application/json', temperature=0),
+    }
+    # JSON mode removes the usual prose/fenced response. A single retry covers
+    # rare empty or truncated responses without abandoning the LLM path.
+    for attempt in range(2):
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(**request),
+            timeout=float(os.getenv('TRIAGE_LLM_TIMEOUT_SECONDS', '30')),
+        )
+        try:
+            value = _parse_gemini_json(response.text)
+            break
+        except (json.JSONDecodeError, ValueError):
+            if attempt:
+                raise
     level, confidence = int(value['triage_level']), float(value['confidence'])
     if level not in range(1, 6) or not 0 <= confidence <= 1:
         raise ValueError('Provider response outside supported range')

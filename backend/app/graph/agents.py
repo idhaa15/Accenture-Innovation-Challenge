@@ -62,7 +62,9 @@ def _block_provider(name: str, seconds: float = 30.0) -> None:
 
 
 def _error_summary(exc: Exception) -> str:
-    return f'{type(exc).__name__}:{getattr(exc, "status_code", None) or getattr(exc, "code", None) or "unknown"}'
+    code = getattr(exc, 'status_code', None) or getattr(exc, 'code', None) or 'unknown'
+    detail = ' '.join(str(exc).split())[:180]
+    return f'{type(exc).__name__}:{code}{":" + detail if detail else ""}'
 
 
 class TriageState(TypedDict, total=False):

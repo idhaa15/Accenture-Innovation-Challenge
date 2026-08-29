@@ -78,6 +78,17 @@ def restore_graph_weights() -> int:
     return len(updates)
 
 
+def needs_legacy_reassessment(patient_id: str) -> bool:
+    """Recover active records created before a triage log was written."""
+    latest = database.latest_triage(patient_id)
+    if not latest:
+        return True
+    try:
+        return not bool(json.loads(latest.get('explanation_json') or '{}'))
+    except (TypeError, json.JSONDecodeError):
+        return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.initialise()
@@ -87,7 +98,7 @@ async def lifespan(app: FastAPI):
         records = json.loads((Path(__file__).parent / 'mock_data' / 'simulated_patients.json').read_text())
         await assess_many(records[:5])
     else:
-        legacy = [patient for patient in database.active_patient_inputs() if not json.loads(database.latest_triage(patient['patient_id']).get('explanation_json', '{}'))]
+        legacy = [patient for patient in database.active_patient_inputs() if needs_legacy_reassessment(patient['patient_id'])]
         if legacy:
             await assess_many(legacy)
     yield

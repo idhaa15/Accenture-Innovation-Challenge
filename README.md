@@ -1,7 +1,7 @@
 # MediLens — Safety-First Emergency Triage
 
 [![Live Demo](https://img.shields.io/badge/Open-Live%20Demo-315f53?style=for-the-badge)](https://drive.google.com/drive/folders/1Fz94vi-Rk7NqGDjhDlwOIb54pm1JdVDh?dmr=1&ec=wgc-drive-hero-goto)
-[![API](https://img.shields.io/badge/API-FastAPI-111827?style=for-the-badge)](http://localhost:8003/health)
+[![Deck](https://img.shields.io/badge/View-Deck-111827?style=for-the-badge)](https://drive.google.com/drive/folders/1Fz94vi-Rk7NqGDjhDlwOIb54pm1JdVDh?dmr=1&ec=wgc-drive-hero-goto)
 
 > **Decision support only.** MediLens is a fictional hackathon prototype, not a diagnostic device, validated clinical protocol, or real-patient deployment.
 
